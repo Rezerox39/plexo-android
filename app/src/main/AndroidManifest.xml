@@ -8,6 +8,17 @@
     <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
 
+    <!-- Only to read whether the Bluetooth radio is on, on Android 11 and older. -->
+    <uses-permission
+        android:name="android.permission.BLUETOOTH"
+        android:maxSdkVersion="30" />
+
+    <!-- That permission implies Bluetooth hardware; keep installs possible on
+         Ethernet-only docks and tablets without a Bluetooth radio. -->
+    <uses-feature
+        android:name="android.hardware.bluetooth"
+        android:required="false" />
+
     <!-- Runtime permission on Android 13+ so we can show download progress. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />

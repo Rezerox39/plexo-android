@@ -1,5 +1,6 @@
 package app.getplexo.mobile.ui
 
+import android.content.Context
 import android.content.Intent
 import android.provider.Settings
 import androidx.compose.foundation.BorderStroke
@@ -117,10 +118,15 @@ fun HomeScreen(
             rows = states,
             duplicates = duplicateIds,
             download = download,
-            onToggle = { id, on -> vm.setLinkEnabled(id, on) },
-            onOpenBluetoothSettings = {
-                runCatching { context.startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS)) }
+            onToggle = { id, on ->
+                vm.setLinkEnabled(id, on)
+                // If the radio is known to be off, a switch alone cannot bring it up:
+                // take the user straight to the panel that can. The inline button stays
+                // available for cases the app cannot detect (mobile data, Bluetooth 12+).
+                val radioOff = on && links.firstOrNull { it.id == id }?.state?.value?.radioOff == true
+                if (radioOff) openLinkSettings(context, id)
             },
+            onOpenLinkSettings = { id -> openLinkSettings(context, id) },
         )
 
         NewDownloadPanel(
@@ -152,7 +158,7 @@ fun HomeScreen(
 
         Spacer(Modifier.height(10.dp))
         Text(
-            text = "Plexo 0.2.1 · open source, no servers, no VPN",
+            text = "Plexo 0.2.2 · open source, no servers, no VPN",
             style = MaterialTheme.typography.bodySmall,
             color = TextMuted.copy(alpha = 0.7f),
         )
@@ -194,7 +200,7 @@ private fun LinkPanel(
     duplicates: Set<String>,
     download: DownloadSnapshot?,
     onToggle: (String, Boolean) -> Unit,
-    onOpenBluetoothSettings: () -> Unit,
+    onOpenLinkSettings: (String) -> Unit,
 ) {
     val active = rows.count { (link, state) ->
         state.enabled && state.connected && link.id !in duplicates
@@ -232,7 +238,7 @@ private fun LinkPanel(
                 progress = progress,
                 duplicate = link.id in duplicates,
                 onToggle = { onToggle(link.id, it) },
-                onOpenBluetoothSettings = onOpenBluetoothSettings,
+                onOpenLinkSettings = { onOpenLinkSettings(link.id) },
             )
         }
     }
@@ -245,7 +251,7 @@ private fun LinkRow(
     progress: LinkProgress?,
     duplicate: Boolean,
     onToggle: (Boolean) -> Unit,
-    onOpenBluetoothSettings: () -> Unit,
+    onOpenLinkSettings: () -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -284,7 +290,7 @@ private fun LinkRow(
                     text = statusText(state, duplicate),
                     style = MaterialTheme.typography.bodySmall,
                     color = TextMuted,
-                    maxLines = 2,
+                    maxLines = 3,
                     overflow = TextOverflow.Ellipsis,
                 )
             }
@@ -303,15 +309,16 @@ private fun LinkRow(
             )
         }
 
-        // Android has no API for an app to bring up a Bluetooth PAN by itself: the user
-        // has to allow internet access for the paired device in system settings.
-        if (link.id == "bluetooth" && state.enabled && !state.connected) {
+        // Android has no API that lets an app turn a radio on. Offer the system panel
+        // instead, which is the closest the platform allows.
+        val action = settingsAction(link.id)
+        if (action != null && state.enabled && !state.connected) {
             TextButton(
-                onClick = onOpenBluetoothSettings,
+                onClick = onOpenLinkSettings,
                 contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp),
             ) {
                 Text(
-                    text = "Open Bluetooth settings",
+                    text = action,
                     style = MaterialTheme.typography.bodySmall,
                     color = Mint,
                 )
@@ -672,6 +679,7 @@ private fun LimitsPanel() {
             color = TextMuted,
         )
         Spacer(Modifier.height(10.dp))
+        Bullet("Android does not let an app switch Wi-Fi or mobile data on or off. The switches here pick which links Plexo may use; when a radio is off, Plexo shows a shortcut to the system panel that owns it.")
         Bullet("One Wi-Fi radio can only be joined to one network at a time. Two Wi-Fi networks at once is not possible on stock Android.")
         Bullet("What can run at once: Wi-Fi + mobile data + Bluetooth PAN + a wired/USB adapter, each radio carrying different chunks of the same file.")
         Bullet("Bluetooth PAN needs a paired device that shares its connection. Android does not let an app start that itself, so pair it and allow internet access in Bluetooth settings. Expect only about 1–2 Mbps.")
@@ -714,6 +722,42 @@ private fun PanelCard(
             .padding(18.dp),
         content = content,
     )
+}
+
+/** Label for the system shortcut on a link that is on but has no network yet. */
+private fun settingsAction(id: String): String? = when (id) {
+    "wifi" -> "Turn on Wi-Fi"
+    "cellular" -> "Turn on mobile data"
+    "bluetooth" -> "Open Bluetooth settings"
+    else -> null
+}
+
+/**
+ * Opens the system panel that owns a radio. Android 10+ has inline quick panels
+ * (Wi-Fi, internet); older OEM builds only have the full settings screen, so each
+ * candidate is tried in order until one opens.
+ */
+private fun openLinkSettings(context: Context, id: String) {
+    val candidates = when (id) {
+        "wifi" -> listOf(
+            Intent(Settings.Panel.ACTION_WIFI),
+            Intent(Settings.ACTION_WIFI_SETTINGS),
+        )
+        "cellular" -> listOf(
+            Intent(Settings.Panel.ACTION_INTERNET_CONNECTIVITY),
+            Intent(Settings.ACTION_DATA_USAGE_SETTINGS),
+            Intent(Settings.ACTION_WIRELESS_SETTINGS),
+        )
+        "bluetooth" -> listOf(Intent(Settings.ACTION_BLUETOOTH_SETTINGS))
+        else -> return
+    }
+    for (intent in candidates) {
+        // From an Activity the panel should stay in the same task so Back returns here.
+        if (context !is android.app.Activity) {
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        if (runCatching { context.startActivity(intent) }.isSuccess) return
+    }
 }
 
 private fun statusText(state: LinkState, duplicate: Boolean = false): String = when {

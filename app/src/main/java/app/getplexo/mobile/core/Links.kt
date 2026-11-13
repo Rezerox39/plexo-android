@@ -1,13 +1,13 @@
 package app.getplexo.mobile.core
 
+import android.bluetooth.BluetoothManager
 import android.content.Context
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
+import android.net.wifi.WifiManager
 import android.os.Build
-import android.os.Handler
-import android.os.Looper
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -27,6 +27,8 @@ data class LinkState(
     val metered: Boolean = false,
     val downstreamKbps: Int = 0,
     val note: String? = null,
+    /** True when the switch is on, but the OS radio behind it is known to be off. */
+    val radioOff: Boolean = false,
     /**
      * Kernel interface behind the network, e.g. wlan0, rmnet_data0, bt-pan, eth0.
      * Two links can receive different [android.net.Network] handles for one interface;
@@ -54,16 +56,18 @@ class Link(
     val color: Long,
     private val cm: ConnectivityManager,
     initiallyEnabled: Boolean,
-    private val missingNote: String,
+    /** Shown while the link is on but the user has switched the radio off. */
+    private val offNote: String,
+    /** Shown while the link is on and the radio is on, but no network exists yet. */
+    private val waitingNote: String,
+    /** Reads the system radio switch; null when the platform hides it. */
+    private val radioOn: () -> Boolean?,
 ) {
     private val _state = MutableStateFlow(LinkState(enabled = initiallyEnabled))
     val state: StateFlow<LinkState> = _state.asStateFlow()
 
-    private val handler = Handler(Looper.getMainLooper())
     private var callback: ConnectivityManager.NetworkCallback? = null
     private var enabled = initiallyEnabled
-    private var retryPending = false
-    private var retryDelayMs = INITIAL_RETRY_MS
 
     @Volatile
     private var network: Network? = null
@@ -87,20 +91,28 @@ class Link(
         callback = null
         network = null
         cb?.let { runCatching { cm.unregisterNetworkCallback(it) } }
-        handler.removeCallbacksAndMessages(null)
-        retryPending = false
         if (on) {
-            retryDelayMs = INITIAL_RETRY_MS
-            _state.value = _state.value.copy(enabled = true, connected = false, note = null)
+            _state.value = LinkState(enabled = true)
             request()
         } else {
             _state.value = LinkState(enabled = false)
         }
     }
 
+    /**
+     * Asks the platform for a network of this transport and keeps the request alive.
+     *
+     * Deliberately no timeout: the timed variant is released when it expires, so a
+     * radio the user switches on afterwards is only picked up by the next retry (the
+     * old code backed off to five minutes, which made the switch look dead). Without
+     * a timeout Android keeps the request, brings the radio up when it can (mobile
+     * data while Wi-Fi is on) and calls onAvailable again whenever a matching network
+     * appears, including after the radio was turned off and on.
+     *
+     * No permission can make an app flip Wi-Fi or mobile data itself: Android 10+
+     * blocks that for third party apps, so the panel offers a system shortcut instead.
+     */
     private fun request() {
-        if (!enabled || network != null) return
-
         val builder = NetworkRequest.Builder()
             .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
         transports.distinct().forEach { builder.addTransportType(it) }
@@ -109,11 +121,11 @@ class Link(
         val cb = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
                 this@Link.network = network
-                retryDelayMs = INITIAL_RETRY_MS
                 _state.value = _state.value.copy(
                     enabled = true,
                     connected = true,
                     note = null,
+                    radioOff = false,
                     networkKey = keyFor(network),
                 )
             }
@@ -123,7 +135,6 @@ class Link(
                 caps: NetworkCapabilities,
             ) {
                 this@Link.network = network
-                retryDelayMs = INITIAL_RETRY_MS
                 _state.value = _state.value.copy(
                     enabled = true,
                     connected = true,
@@ -131,58 +142,58 @@ class Link(
                     metered = !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED),
                     downstreamKbps = caps.linkDownstreamBandwidthKbps,
                     note = null,
+                    radioOff = false,
                     networkKey = keyFor(network) ?: _state.value.networkKey,
                 )
             }
 
             override fun onLost(network: Network) {
-                if (this@Link.network == network) this@Link.network = null
+                // Another network of the same transport may still be live; only react
+                // when the one we are using disappears.
+                if (this@Link.network != network) return
+                this@Link.network = null
                 _state.value = _state.value.copy(
                     connected = false,
                     validated = false,
                     downstreamKbps = 0,
                     networkKey = null,
                 )
-                // The request itself stays alive, so Android will call onAvailable again
-                // if this transport comes back.
-            }
-
-            override fun onUnavailable() {
-                _state.value = _state.value.copy(
-                    enabled = true,
-                    connected = false,
-                    note = missingNote,
-                )
-                scheduleRetry()
+                refreshNote()
             }
         }
 
         callback = cb
         try {
-            // A timeout is only applied to the first match; after that the callback
-            // stays registered for as long as we keep it.
-            cm.requestNetwork(request, cb, REQUEST_TIMEOUT_MS)
-        } catch (e: SecurityException) {
-            _state.value = _state.value.copy(enabled = true, note = "Permission denied: ${e.message}")
+            cm.requestNetwork(request, cb)
+        } catch (e: Exception) {
+            // Not a normal permission error: Android rejects requests when an app has
+            // too many outstanding callbacks. Either way, say so instead of staying silent.
+            _state.value = _state.value.copy(
+                enabled = true,
+                note = if (e is SecurityException) "Permission denied: ${e.message}" else "Link unavailable: ${e.message}",
+            )
+            return
         }
+        refreshNote()
+    }
+
+    /** Explains right away why an enabled link is not carrying traffic yet. */
+    private fun refreshNote() {
+        if (!enabled) return
+        val radio = runCatching { radioOn() }.getOrNull()
+        _state.value = _state.value.copy(
+            radioOff = radio == false && network == null,
+            note = when {
+                network != null -> null
+                radio == false -> offNote
+                else -> waitingNote
+            },
+        )
     }
 
     private fun keyFor(network: Network): String? =
         runCatching { cm.getLinkProperties(network)?.interfaceName }.getOrNull()
             ?: network.toString()
-
-    private fun scheduleRetry() {
-        if (retryPending || !enabled || network != null) return
-        retryPending = true
-        val delay = retryDelayMs
-        // An adapter that is not plugged in will not appear for a while: back off so a
-        // forgotten switch does not wake the system every 20 seconds forever.
-        retryDelayMs = (retryDelayMs * 2).coerceAtMost(MAX_RETRY_MS)
-        handler.postDelayed({
-            retryPending = false
-            if (enabled && network == null) request()
-        }, delay)
-    }
 
     fun release() {
         enabled = false
@@ -190,13 +201,6 @@ class Link(
         callback = null
         network = null
         cb?.let { runCatching { cm.unregisterNetworkCallback(it) } }
-        handler.removeCallbacksAndMessages(null)
-    }
-
-    private companion object {
-        const val REQUEST_TIMEOUT_MS = 20_000
-        const val INITIAL_RETRY_MS = 20_000L
-        const val MAX_RETRY_MS = 5 * 60_000L
     }
 }
 
@@ -207,6 +211,19 @@ class LinkRegistry(context: Context) {
     private val prefs = app.getSharedPreferences("plexo_links", Context.MODE_PRIVATE)
     private val cm = app.getSystemService(ConnectivityManager::class.java)
 
+    private val wifiManager = app.getSystemService(WifiManager::class.java)
+    private val bluetoothManager = app.getSystemService(BluetoothManager::class.java)
+
+    // Reading the system switch is allowed; only flipping it is blocked for apps.
+    @Suppress("DEPRECATION")
+    private fun wifiRadioOn(): Boolean? = runCatching { wifiManager?.isWifiEnabled }.getOrNull()
+
+    // From Android 12 this needs BLUETOOTH_CONNECT, which Plexo does not ask for, so the
+    // answer is null there and the link shows the generic waiting note instead.
+    @Suppress("DEPRECATION")
+    private fun bluetoothRadioOn(): Boolean? =
+        runCatching { bluetoothManager?.adapter?.isEnabled }.getOrNull()
+
     val links: List<Link> = listOf(
         Link(
             id = "wifi",
@@ -216,7 +233,9 @@ class LinkRegistry(context: Context) {
             color = 0xFF34D399,
             cm = cm,
             initiallyEnabled = prefs.getBoolean("wifi", true),
-            missingNote = "Not connected to a Wi-Fi network.",
+            offNote = "Wi-Fi is switched off. Android does not let an app switch it on — tap “Turn on Wi-Fi”.",
+            waitingNote = "No Wi-Fi network yet.",
+            radioOn = { wifiRadioOn() },
         ),
         Link(
             id = "cellular",
@@ -226,7 +245,9 @@ class LinkRegistry(context: Context) {
             color = 0xFF818CF8,
             cm = cm,
             initiallyEnabled = prefs.getBoolean("cellular", false),
-            missingNote = "No mobile data. Check mobile data is on, and enable Developer options › Mobile data always active.",
+            offNote = "Mobile data is not available. Android requires you to turn it on in the system panel.",
+            waitingNote = "Waiting for mobile data. If it is switched off, turn it on with the button below; if it stays down while Wi-Fi is on, enable Developer options › Mobile data always active.",
+            radioOn = { null },
         ),
         Link(
             id = "ethernet",
@@ -243,7 +264,9 @@ class LinkRegistry(context: Context) {
             color = 0xFFF59E0B,
             cm = cm,
             initiallyEnabled = prefs.getBoolean("ethernet", true),
-            missingNote = "No wired adapter. Plug in a USB/OTG Ethernet adapter or a USB-C dock.",
+            offNote = "No wired adapter. Plug in a USB/OTG Ethernet adapter or a USB-C dock.",
+            waitingNote = "No wired adapter. Plug in a USB/OTG Ethernet adapter or a USB-C dock.",
+            radioOn = { null },
         ),
         Link(
             id = "bluetooth",
@@ -253,7 +276,9 @@ class LinkRegistry(context: Context) {
             color = 0xFF38BDF8,
             cm = cm,
             initiallyEnabled = prefs.getBoolean("bluetooth", false),
-            missingNote = "No Bluetooth network. Pair a phone that shares its connection, then turn on internet access for it in Bluetooth settings.",
+            offNote = "No Bluetooth PAN. Pair a phone that shares its connection, then turn on internet access for it in Bluetooth settings.",
+            waitingNote = "No Bluetooth PAN. Pair a phone that shares its connection, then turn on internet access for it in Bluetooth settings.",
+            radioOn = { bluetoothRadioOn() },
         ),
     )
 

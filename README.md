@@ -76,7 +76,12 @@ like bonding while adding no bandwidth, and the UI says so instead.
 ## Screens and features
 
 - **Links panel** — Wi-Fi, Mobile data, Bluetooth PAN and Wired/USB with live
-  state, and a switch per link. Toggles persist across launches.
+  state, and a switch per link. Toggles persist across launches. Android 10+
+  forbids apps from switching Wi-Fi or mobile data on themselves, so a switch
+  only declares "Plexo may use this link": when the radio is off the panel says
+  so immediately and offers a button that opens the right system panel. The
+  network request stays registered, so the link joins as soon as the radio
+  comes up, without a restart or a retry wait.
 - **Parallel chunked downloader** — probes the server, honours `Accept-Ranges`,
   works out the file name from `Content-Disposition`, splits the file into chunks
   and lets all links pull from one shared cursor. Faster links simply take more
@@ -93,7 +98,7 @@ like bonding while adding no bandwidth, and the UI says so instead.
 
 ## Install
 
-Grab `plexo-0.2.1-debug.apk` from the [latest release](../../releases/latest) and open it
+Grab `plexo-0.2.2-debug.apk` from the [latest release](../../releases/latest) and open it
 on the phone. It is debug-signed, so Android asks you to allow installing from your
 browser or file manager the first time.
 

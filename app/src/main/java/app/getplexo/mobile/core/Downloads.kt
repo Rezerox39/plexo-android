@@ -133,6 +133,9 @@ class DownloadTask(
 
     private var speed = 0L
 
+    /** True while every link is gone and the workers are waiting for one to return. */
+    @Volatile private var waitingForLink = false
+
     /**
      * Rolling 2 s windows (timestamp, bytes) for the overall job and for each link.
      * A single 500 ms window is far too noisy on a mobile radio: it reports the
@@ -353,7 +356,7 @@ class DownloadTask(
 
         while (true) {
             currentCoroutineContext().ensureActive()
-            val link = pickLink(preferred) ?: throw IOException("Every link failed")
+            val link = awaitLink(preferred) ?: throw IOException("Every link failed")
             try {
                 fetch(link, range, channel, buffer)
                 failures[link.id]?.set(0)
@@ -465,7 +468,7 @@ class DownloadTask(
         var attempt = 0
         while (true) {
             currentCoroutineContext().ensureActive()
-            val link = pickLink(null) ?: throw IOException("No link is connected")
+            val link = awaitLink(null) ?: throw IOException("No link is connected")
             try {
                 part.delete()
                 done.set(0)
@@ -502,6 +505,25 @@ class DownloadTask(
                 delay(1000L * attempt)
             }
         }
+    }
+
+    /**
+     * Waits up to 30 s for a link to come back. Mobile handovers (LTE -> 5G, Wi-Fi
+     * roaming, a VPN reconnect) briefly tear the network down; failing the whole job
+     * for that is how a download appears to "stop after a few seconds".
+     */
+    private suspend fun awaitLink(preferred: Link?): Link? {
+        var waited = 0L
+        while (waited <= WAIT_FOR_LINK_MS) {
+            pickLink(preferred)?.let {
+                waitingForLink = false
+                return it
+            }
+            waitingForLink = true
+            delay(500)
+            waited += 500
+        }
+        return null
     }
 
     private fun pickLink(preferred: Link?): Link? {
@@ -587,7 +609,7 @@ class DownloadTask(
             speedBps = speed,
             links = links,
             parallel = parallel,
-            message = message,
+            message = message ?: if (waitingForLink) "Waiting for a network…" else null,
             savedTo = savedTo,
         )
     }
@@ -624,6 +646,8 @@ class DownloadTask(
         const val READ_BUFFER_BYTES = 256 * 1024
         /** Speed is averaged over this window so the readout does not flicker. */
         const val SPEED_WINDOW_MS = 2000L
+        /** How long workers wait for a dropped link before failing. */
+        const val WAIT_FOR_LINK_MS = 30_000L
     }
 }
 

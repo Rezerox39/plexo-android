@@ -9,6 +9,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.IBinder
+import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import app.getplexo.mobile.MainActivity
@@ -30,11 +31,20 @@ class DownloadService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private lateinit var repo: DownloadRepository
     private var sawWork = false
+    private var wakeLock: PowerManager.WakeLock? = null
 
     override fun onCreate() {
         super.onCreate()
         repo = (application as PlexoApp).downloads
         createChannel()
+        // A foreground service alone does not keep the CPU awake; with the screen off
+        // the download can be suspended mid-range. Six hours is a safety valve.
+        wakeLock = getSystemService(PowerManager::class.java)
+            ?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "plexo:download")
+            ?.apply {
+                setReferenceCounted(false)
+                acquire(6 * 60 * 60 * 1000L)
+            }
         startForeground(
             NOTIFICATION_ID,
             buildNotification(DownloadSnapshot.idle(), "Preparing download"),
@@ -80,6 +90,8 @@ class DownloadService : Service() {
     }
 
     override fun onDestroy() {
+        wakeLock?.let { if (it.isHeld) it.release() }
+        wakeLock = null
         repo.cancel()
         scope.cancel()
         super.onDestroy()

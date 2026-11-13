@@ -12,9 +12,14 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import okhttp3.ConnectionPool
+import okhttp3.Cookie
+import okhttp3.CookieJar
 import okhttp3.Dispatcher
 import okhttp3.Dns
+import okhttp3.HttpUrl
 import okhttp3.OkHttpClient
+import okhttp3.Protocol
+import java.util.concurrent.CopyOnWriteArrayList
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Socket
@@ -346,6 +351,22 @@ class BoundSocketFactory(private val network: Network) : SocketFactory() {
     ): Socket = createSocket(address, port)
 }
 
+/** Session cookies for one network client, enough for hosts that require a handshake. */
+private class MemoryCookieJar : CookieJar {
+    private val byHost = java.util.concurrent.ConcurrentHashMap<String, CopyOnWriteArrayList<Cookie>>()
+
+    override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
+        val list = byHost.getOrPut(url.host) { CopyOnWriteArrayList() }
+        cookies.forEach { fresh ->
+            list.removeAll { it.name == fresh.name && it.path == fresh.path }
+            list.add(fresh)
+        }
+    }
+
+    override fun loadForRequest(url: HttpUrl): List<Cookie> =
+        byHost[url.host]?.filter { it.matches(url) }.orEmpty()
+}
+
 /** DNS lookups through the same network, so split-DNS and captive links resolve correctly. */
 private class NetworkDns(private val network: Network) : Dns {
     override fun lookup(hostname: String): List<InetAddress> =
@@ -355,10 +376,18 @@ private class NetworkDns(private val network: Network) : Dns {
 fun clientFor(network: Network): OkHttpClient = OkHttpClient.Builder()
     .socketFactory(BoundSocketFactory(network))
     .dns(NetworkDns(network))
+    // One TCP connection per stream. With HTTP/2, OkHttp multiplexes every range
+    // over a single connection, so the server's per-connection cap applies to the
+    // whole download. Forcing HTTP/1.1 gives each worker its own socket, which is
+    // the entire reason range downloads are fast.
+    .protocols(listOf(Protocol.HTTP_1_1))
+    // File hosts hand out a session cookie on the first response. Without a jar the
+    // chunk requests lose it and the server answers 403/200 after a few seconds.
+    .cookieJar(MemoryCookieJar())
     // Each client belongs to exactly one network, so its pool can never hand a Wi-Fi
     // socket to the cellular link. A deep pool keeps every chunk on a warm connection;
     // a fresh TCP+TLS handshake per chunk would waste a full round trip each time.
-    .connectionPool(ConnectionPool(16, 5, TimeUnit.MINUTES))
+    .connectionPool(ConnectionPool(32, 5, TimeUnit.MINUTES))
     .dispatcher(
         Dispatcher().apply {
             maxRequests = 64

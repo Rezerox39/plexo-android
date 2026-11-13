@@ -714,8 +714,8 @@ private fun TuningPanel(vm: PlexoViewModel) {
                 streams = it.roundToInt()
                 vm.settings.streamsPerLink = streams
             },
-            valueRange = 1f..8f,
-            steps = 6,
+            valueRange = 1f..16f,
+            steps = 14,
             colors = SliderDefaults.colors(
                 thumbColor = Amber,
                 activeTrackColor = Amber,

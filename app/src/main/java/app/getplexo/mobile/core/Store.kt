@@ -1,0 +1,56 @@
+package app.getplexo.mobile.core
+
+import android.content.ContentValues
+import android.content.Context
+import android.os.Environment
+import android.provider.MediaStore
+import android.webkit.MimeTypeMap
+import java.io.File
+import java.io.IOException
+
+/** Hands a finished temp file to the public Downloads collection. */
+object Store {
+
+    fun save(context: Context, source: File, displayName: String, mime: String?): String {
+        val resolver = context.contentResolver
+        val type = mime?.takeIf { it.isNotBlank() && it != "application/octet-stream" }
+            ?: MimeTypeMap.getSingleton()
+                .getMimeTypeFromExtension(displayName.substringAfterLast('.', "").lowercase())
+            ?: "application/octet-stream"
+
+        val values = ContentValues().apply {
+            put(MediaStore.Downloads.DISPLAY_NAME, displayName)
+            put(MediaStore.Downloads.MIME_TYPE, type)
+            put(MediaStore.Downloads.IS_PENDING, 1)
+            put(MediaStore.Downloads.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/Plexo")
+        }
+
+        val collection = MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+        val uri = resolver.insert(collection, values)
+            ?: throw IOException("Could not create the file in Downloads")
+
+        try {
+            resolver.openOutputStream(uri)?.use { out ->
+                source.inputStream().use { input -> input.copyTo(out, DEFAULT_BUFFER_SIZE) }
+            } ?: throw IOException("Could not open the destination file")
+            values.clear()
+            values.put(MediaStore.Downloads.IS_PENDING, 0)
+            resolver.update(uri, values, null, null)
+        } catch (e: Exception) {
+            runCatching { resolver.delete(uri, null, null) }
+            throw e
+        }
+
+        return "Download/Plexo/$displayName"
+    }
+
+    fun sanitize(raw: String): String {
+        val cleaned = raw
+            .substringAfterLast('/')
+            .substringBefore('?')
+            .replace(Regex("[\\\\/:*?\"<>|\\u0000-\\u001f]"), "_")
+            .trim()
+            .trimStart('.')
+        return cleaned.ifBlank { "download" }.take(180)
+    }
+}

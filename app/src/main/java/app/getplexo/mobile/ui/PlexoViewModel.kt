@@ -37,7 +37,7 @@ class PlexoViewModel(application: Application) : AndroidViewModel(application) {
         return null
     }
 
-    fun cancel() = DownloadService.cancel(getApplication())
+    fun cancel() = repo.cancel()
 
     fun dismiss() = repo.dismiss()
 

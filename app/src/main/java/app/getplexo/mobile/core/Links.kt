@@ -328,6 +328,16 @@ private class NetworkDns(private val network: Network) : Dns {
 fun clientFor(network: Network): OkHttpClient = OkHttpClient.Builder()
     .socketFactory(BoundSocketFactory(network))
     .dns(NetworkDns(network))
+    .addInterceptor { chain ->
+        // identity encoding is important: a gzipped range no longer matches the file
+        // offsets we write to. A User-Agent also keeps picky CDNs from refusing us.
+        chain.proceed(
+            chain.request().newBuilder()
+                .header("User-Agent", "Plexo/0.2 (+https://github.com/Rezerox39/plexo-android)")
+                .header("Accept-Encoding", "identity")
+                .build(),
+        )
+    }
     .connectTimeout(20, TimeUnit.SECONDS)
     .readTimeout(30, TimeUnit.SECONDS)
     .writeTimeout(30, TimeUnit.SECONDS)

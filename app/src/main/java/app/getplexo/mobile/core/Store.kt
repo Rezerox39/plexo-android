@@ -41,7 +41,12 @@ object Store {
             throw e
         }
 
-        return "Download/Plexo/$displayName"
+        // MediaStore renames on a name collision ("file (1).iso"); report what it kept.
+        val actual = runCatching {
+            resolver.query(uri, arrayOf(MediaStore.Downloads.DISPLAY_NAME), null, null, null)
+                ?.use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
+        }.getOrNull() ?: displayName
+        return "Download/Plexo/$actual"
     }
 
     fun sanitize(raw: String): String {

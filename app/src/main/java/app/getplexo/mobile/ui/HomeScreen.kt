@@ -44,6 +44,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -151,7 +152,7 @@ fun HomeScreen(
 
         Spacer(Modifier.height(10.dp))
         Text(
-            text = "Plexo 0.2 · open source, no servers, no VPN",
+            text = "Plexo 0.2.1 · open source, no servers, no VPN",
             style = MaterialTheme.typography.bodySmall,
             color = TextMuted.copy(alpha = 0.7f),
         )
@@ -587,8 +588,8 @@ private fun SplitBar(snapshot: DownloadSnapshot, links: List<Link>) {
 
 @Composable
 private fun TuningPanel(vm: PlexoViewModel) {
-    var streams by rememberSaveable { mutableStateOf(vm.settings.streamsPerLink) }
-    var chunk by rememberSaveable { mutableStateOf(vm.settings.chunkMb) }
+    var streams by rememberSaveable { mutableIntStateOf(vm.settings.streamsPerLink) }
+    var chunk by rememberSaveable { mutableIntStateOf(vm.settings.chunkMb) }
 
     PanelCard {
         Text(

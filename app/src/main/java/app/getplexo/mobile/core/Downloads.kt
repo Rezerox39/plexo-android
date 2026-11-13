@@ -27,8 +27,10 @@ import java.nio.channels.FileChannel
 import java.util.Collections
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 
 enum class DownloadStatus {
     PREPARING,
@@ -161,7 +163,9 @@ class DownloadTask(
             publish(snap(DownloadStatus.CANCELLED, message = "Cancelled"))
             runCatching { part.delete() }
             throw e
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
+            // Catch Error too: leaving the state at RUNNING would strand the UI and
+            // keep the foreground service alive forever.
             publish(snap(DownloadStatus.ERROR, message = e.message ?: e.javaClass.simpleName))
             runCatching { part.delete() }
         }
@@ -172,16 +176,41 @@ class DownloadTask(
 
     /** One ranged request tells us size, range support and the real file name. */
     private suspend fun probe() = withContext(Dispatchers.IO) {
-        val link = registry.usable().firstOrNull()
-            ?: throw IOException("No link is connected. Turn on Wi-Fi or mobile data.")
+        val candidates = registry.usable()
+        if (candidates.isEmpty()) {
+            throw IOException("No link is connected. Turn on Wi-Fi or mobile data.")
+        }
+
+        // Try every live link: the first one can be a captive portal or a dead route
+        // whatever the OS thinks about it.
+        var last: Exception? = null
+        for (link in candidates) {
+            currentCoroutineContext().ensureActive()
+            try {
+                probeOn(link)
+                return@withContext
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                last = e
+            }
+        }
+        throw last ?: IOException("Could not reach the server")
+    }
+
+    private fun probeOn(link: Link) {
+        val network = link.network() ?: throw IOException("${link.title} disconnected")
         mime = null
+        parallel = false
+        totalBytes = -1L
+
         val request = Request.Builder()
             .url(url)
             .header("Range", "bytes=0-0")
             .get()
             .build()
 
-        clientFor(link.network()!!).newCall(request).execute().use { response ->
+        clientFor(network).newCall(request).execute().use { response ->
             if (response.code >= 400 && response.code != 416) {
                 throw IOException("Server answered HTTP ${response.code}")
             }
@@ -217,24 +246,68 @@ class DownloadTask(
             val usable = registry.usable()
             if (usable.isEmpty()) throw IOException("No link is connected")
 
-            usable.flatMap { link -> List(streamsPerLink) { link } }.forEach { link ->
-                launch(Dispatchers.IO) {
-                    while (isActive) {
-                        val index = cursor.getAndIncrement()
-                        if (index >= chunkCount) break
-                        val counter = activeByLink.getOrPut(link.id) { AtomicInteger() }
-                        counter.incrementAndGet()
-                        try {
-                            chunk(channel, index, link)
-                        } finally {
-                            counter.decrementAndGet()
-                        }
-                    }
-                }
+            val failed = ConcurrentLinkedQueue<Int>()
+            val firstError = AtomicReference<Exception?>(null)
+
+            drain(channel, usable, { cursor.getAndIncrement().takeIf { it < chunkCount } }, failed, firstError)
+
+            // A chunk that exhausted its attempts must not sink the whole file: park it
+            // and retry the leftovers once the main pass is done.
+            var round = 0
+            while (failed.isNotEmpty() && round < MAX_RETRY_ROUNDS) {
+                if (done.get() == 0L) break // nothing ever worked; the server or links are down
+                round++
+                val batch = failed.toList()
+                failed.clear()
+                failures.clear()
+                deadLinks.clear()
+                delay(500L * round)
+                val links = registry.usable().ifEmpty { usable }
+                val next = AtomicInteger(0)
+                drain(channel, links, { batch.getOrNull(next.getAndIncrement()) }, failed, firstError)
+            }
+
+            if (failed.isNotEmpty()) {
+                throw IOException("${failed.size} of $chunkCount chunks still failed", firstError.get())
             }
         } finally {
             ticker.cancel()
             channel.close()
+        }
+    }
+
+    /** Runs [next] on one coroutine per stream until it produces null. */
+    private suspend fun drain(
+        channel: FileChannel,
+        links: List<Link>,
+        next: () -> Int?,
+        failed: MutableCollection<Int>,
+        firstError: AtomicReference<Exception?>,
+    ) = coroutineScope {
+        links.flatMap { link -> List(streamsPerLink) { link } }.forEach { link ->
+            launch(Dispatchers.IO) {
+                while (isActive) {
+                    val index = next() ?: break
+                    val counter = activeByLink.getOrPut(link.id) { AtomicInteger() }
+                    counter.incrementAndGet()
+                    try {
+                        chunk(channel, index, link)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        failed.add(index)
+                        firstError.compareAndSet(null, e)
+                        // Several chunks failing before a single byte arrives means the
+                        // server or every route is down. Fail now instead of grinding
+                        // through the whole file at up to 20 s per attempt.
+                        if (done.get() == 0L && failed.size >= ABORT_AFTER_FAILURES) {
+                            throw IOException("Download cannot start: ${e.message}", e)
+                        }
+                    } finally {
+                        counter.decrementAndGet()
+                    }
+                }
+            }
         }
     }
 
@@ -282,6 +355,7 @@ class DownloadTask(
         try {
             clientFor(link).newCall(request).execute().use { response ->
                 if (response.code != 206) throw IOException("Server answered ${response.code}")
+                checkRange(response.header("Content-Range"), start, end)
                 val body = response.body ?: throw IOException("Empty response body")
                 val expected = end - start + 1
                 var written = 0L
@@ -320,8 +394,21 @@ class DownloadTask(
         }
     }
 
-    /** Used when the server ignores Range requests or the size is unknown. */
-    private suspend fun runSingle(part: File) = coroutineScope {
+    /**
+     * A 206 is not enough: if the server answers with a different start offset, the
+     * bytes would land in the wrong place and silently corrupt the file.
+     */
+    private fun checkRange(header: String?, start: Long, end: Long) {
+        val value = header ?: throw IOException("Server sent no Content-Range")
+        val match = Regex("bytes\\s+(\\d+)-(\\d+)/").find(value)
+            ?: throw IOException("Unreadable Content-Range: $value")
+        val gotStart = match.groupValues[1].toLongOrNull()
+        if (gotStart != start) {
+            throw IOException("Server sent range $value, asked $start-$end")
+        }
+    }
+
+    /** Used when the server ignores Range requests or the size is unknown. */    private suspend fun runSingle(part: File) = coroutineScope {
         publish(snap(DownloadStatus.RUNNING))
         val ticker = launch {
             while (isActive) {
@@ -471,6 +558,13 @@ class DownloadTask(
         val last = Uri.parse(url).lastPathSegment.orEmpty()
         return if (last.contains('.')) last else "download"
     }
+
+    private companion object {
+        /** Extra passes over chunks that failed, after the main pass. */
+        const val MAX_RETRY_ROUNDS = 3
+        /** Chunks that may fail before any byte arrives before the job is called dead. */
+        const val ABORT_AFTER_FAILURES = 6
+    }
 }
 
 /** Single app-wide download state. The UI and the foreground service both observe it. */
@@ -485,6 +579,16 @@ class DownloadRepository(context: Context) {
     val links = LinkRegistry(app)
 
     private var job: Job? = null
+
+    init {
+        // Resume is not implemented yet, so a .part left behind by a killed process is
+        // only dead weight (it can be gigabytes). Nothing is running this early.
+        runCatching {
+            File(app.filesDir, "downloads").listFiles()
+                ?.filter { it.isFile }
+                ?.forEach { it.delete() }
+        }
+    }
 
     val busy: Boolean get() = job?.isActive == true
 

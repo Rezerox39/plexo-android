@@ -31,7 +31,9 @@ object Store {
 
         try {
             resolver.openOutputStream(uri)?.use { out ->
-                source.inputStream().use { input -> input.copyTo(out, DEFAULT_BUFFER_SIZE) }
+                // One big buffer: this is a straight copy of the finished file, and the
+                // 8 KB default made multi-gigabyte saves needlessly slow.
+                source.inputStream().use { input -> input.copyTo(out, 1024 * 1024) }
             } ?: throw IOException("Could not open the destination file")
             values.clear()
             values.put(MediaStore.Downloads.IS_PENDING, 0)

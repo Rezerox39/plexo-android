@@ -1,15 +1,38 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- Plexo's mark: three network lines (teal, amber, steel) merging into one
+     node and leaving as a single arrow. Same geometry as the desktop icon,
+     kept inside the adaptive-icon safe zone so no mask crops the lines. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <group android:translateX="22" android:translateY="22">
-        <path
-            android:fillColor="#34D399"
-            android:pathData="M12,0h40a12,12 0,0 1,12 12v0a12,12 0,0 1,-12 12h-40a12,12 0,0 1,-12 -12v0a12,12 0,0 1,12 -12z" />
-        <path
-            android:fillColor="#818CF8"
-            android:pathData="M12,36h28a12,12 0,0 1,12 12v0a12,12 0,0 1,-12 12h-28a12,12 0,0 1,-12 -12v0a12,12 0,0 1,12 -12z" />
-    </group>
+    <path
+        android:pathData="M26,38 C38,38 40,54 54,54"
+        android:strokeColor="#4EA89A"
+        android:strokeWidth="4.6"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+    <path
+        android:pathData="M26,54 L54,54"
+        android:strokeColor="#D8A44C"
+        android:strokeWidth="4.6"
+        android:strokeLineCap="round" />
+    <path
+        android:pathData="M26,70 C38,70 40,54 54,54"
+        android:strokeColor="#7E93BD"
+        android:strokeWidth="4.6"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+    <path
+        android:pathData="M54,45 L54,63"
+        android:strokeColor="#F7F4EF"
+        android:strokeWidth="2.2" />
+    <path
+        android:pathData="M45,54 A9,9 0 1,0 63,54 A9,9 0 1,0 45,54"
+        android:strokeColor="#F7F4EF"
+        android:strokeWidth="2.2" />
+    <path
+        android:fillColor="#F7F4EF"
+        android:pathData="M54,45.5 L82,54 L54,62.5 Z" />
 </vector>

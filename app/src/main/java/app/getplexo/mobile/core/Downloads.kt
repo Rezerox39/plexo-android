@@ -132,9 +132,14 @@ class DownloadTask(
     @Volatile private var mime: String? = null
 
     private var speed = 0L
-    private var lastSampleAt = 0L
-    private var lastTotal = 0L
-    private val lastLinkSample = HashMap<String, Long>()
+
+    /**
+     * Rolling 2 s windows (timestamp, bytes) for the overall job and for each link.
+     * A single 500 ms window is far too noisy on a mobile radio: it reports the
+     * burst/sleep pattern of the modem, not the real throughput.
+     */
+    private val history = ArrayDeque<Pair<Long, Long>>()
+    private val historyByLink = HashMap<String, ArrayDeque<Pair<Long, Long>>>()
 
     suspend fun run() {
         val part = partFile()
@@ -229,8 +234,7 @@ class DownloadTask(
     }
 
     private suspend fun runParallel(part: File) = coroutineScope {
-        val chunkCount = ((totalBytes + chunkSize - 1) / chunkSize).toInt().coerceAtLeast(1)
-        val cursor = AtomicInteger(0)
+        val cursor = AtomicLong(0L)
         val channel = RandomAccessFile(part, "rw").channel
 
         publish(snap(DownloadStatus.RUNNING))
@@ -246,12 +250,12 @@ class DownloadTask(
             val usable = registry.usable()
             if (usable.isEmpty()) throw IOException("No link is connected")
 
-            val failed = ConcurrentLinkedQueue<Int>()
+            val failed = ConcurrentLinkedQueue<ByteRange>()
             val firstError = AtomicReference<Exception?>(null)
 
-            drain(channel, usable, { cursor.getAndIncrement().takeIf { it < chunkCount } }, failed, firstError)
+            drain(channel, usable, { link -> nextRange(cursor, link) }, failed, firstError)
 
-            // A chunk that exhausted its attempts must not sink the whole file: park it
+            // A range that exhausted its attempts must not sink the whole file: park it
             // and retry the leftovers once the main pass is done.
             var round = 0
             while (failed.isNotEmpty() && round < MAX_RETRY_ROUNDS) {
@@ -268,7 +272,7 @@ class DownloadTask(
             }
 
             if (failed.isNotEmpty()) {
-                throw IOException("${failed.size} of $chunkCount chunks still failed", firstError.get())
+                throw IOException("${failed.size} ranges still failed", firstError.get())
             }
         } finally {
             ticker.cancel()
@@ -276,28 +280,55 @@ class DownloadTask(
         }
     }
 
+    /**
+     * Hands out the next byte range. The size is per link and adaptive: a fast radio
+     * gets large requests (fewer round trips), a slow one gets small ones so it cannot
+     * sit on the tail of the file while every other link has finished.
+     */
+    private fun nextRange(cursor: AtomicLong, link: Link): ByteRange? {
+        val size = chunkBytesFor(link)
+        val start = cursor.getAndAdd(size)
+        if (start >= totalBytes) return null
+        return ByteRange(start, minOf(totalBytes - 1, start + size - 1))
+    }
+
+    private fun chunkBytesFor(link: Link): Long {
+        val maxChunk = chunkSize.coerceIn(MIN_CHUNK_BYTES, MAX_CHUNK_BYTES)
+        val measured = perLinkSpeed[link.id] ?: 0L
+        // Nothing measured yet: start small. A Bluetooth link that grabbed the configured
+        // 8 MB on its first request would keep the whole download waiting for it at the end.
+        if (measured <= 0L) return minOf(maxChunk, PROBE_CHUNK_BYTES)
+        // About four seconds of work per stream: long enough to amortise the request
+        // round trip, short enough that a slow link can only delay the finish by a few
+        // seconds. The measured speed is the link's total across its streams.
+        val perStream = measured / streamsPerLink.coerceAtLeast(1)
+        return (perStream * CHUNK_SECONDS / 1000).coerceIn(MIN_CHUNK_BYTES, maxChunk)
+    }
+
     /** Runs [next] on one coroutine per stream until it produces null. */
     private suspend fun drain(
         channel: FileChannel,
         links: List<Link>,
-        next: () -> Int?,
-        failed: MutableCollection<Int>,
+        next: (Link) -> ByteRange?,
+        failed: MutableCollection<ByteRange>,
         firstError: AtomicReference<Exception?>,
     ) = coroutineScope {
         links.flatMap { link -> List(streamsPerLink) { link } }.forEach { link ->
             launch(Dispatchers.IO) {
+                // One buffer per worker, reused for every range it downloads.
+                val buffer = ByteArray(READ_BUFFER_BYTES)
                 while (isActive) {
-                    val index = next() ?: break
+                    val range = next(link) ?: break
                     val counter = activeByLink.getOrPut(link.id) { AtomicInteger() }
                     counter.incrementAndGet()
                     try {
-                        chunk(channel, index, link)
+                        chunk(channel, range, link, buffer)
                     } catch (e: CancellationException) {
                         throw e
                     } catch (e: Exception) {
-                        failed.add(index)
+                        failed.add(range)
                         firstError.compareAndSet(null, e)
-                        // Several chunks failing before a single byte arrives means the
+                        // Several ranges failing before a single byte arrives means the
                         // server or every route is down. Fail now instead of grinding
                         // through the whole file at up to 20 s per attempt.
                         if (done.get() == 0L && failed.size >= ABORT_AFTER_FAILURES) {
@@ -312,16 +343,19 @@ class DownloadTask(
     }
 
     /** Grabs one byte range, moving to another link if this one keeps failing. */
-    private suspend fun chunk(channel: FileChannel, index: Int, preferred: Link) {
-        val start = index.toLong() * chunkSize
-        val end = minOf(totalBytes - 1, start + chunkSize - 1)
+    private suspend fun chunk(
+        channel: FileChannel,
+        range: ByteRange,
+        preferred: Link,
+        buffer: ByteArray,
+    ) {
         var attempt = 0
 
         while (true) {
             currentCoroutineContext().ensureActive()
             val link = pickLink(preferred) ?: throw IOException("Every link failed")
             try {
-                fetch(link, start, end, channel, index)
+                fetch(link, range, channel, buffer)
                 failures[link.id]?.set(0)
                 return
             } catch (e: CancellationException) {
@@ -330,7 +364,9 @@ class DownloadTask(
                 val count = failures.getOrPut(link.id) { AtomicInteger() }.incrementAndGet()
                 if (count >= 3) deadLinks.add(link.id)
                 attempt++
-                if (attempt >= 6) throw IOException("Chunk $index failed: ${e.message}", e)
+                if (attempt >= 6) {
+                    throw IOException("Range ${range.start}-${range.end} failed: ${e.message}", e)
+                }
                 delay(300L * attempt)
             }
         }
@@ -338,14 +374,13 @@ class DownloadTask(
 
     private suspend fun fetch(
         link: Link,
-        start: Long,
-        end: Long,
+        range: ByteRange,
         channel: FileChannel,
-        index: Int,
+        buffer: ByteArray,
     ) {
         val request = Request.Builder()
             .url(url)
-            .header("Range", "bytes=$start-$end")
+            .header("Range", "bytes=${range.start}-${range.end}")
             .build()
 
         // Bytes accepted in this attempt. If the attempt dies halfway (flaky link),
@@ -355,14 +390,13 @@ class DownloadTask(
         try {
             clientFor(link).newCall(request).execute().use { response ->
                 if (response.code != 206) throw IOException("Server answered ${response.code}")
-                checkRange(response.header("Content-Range"), start, end)
+                checkRange(response.header("Content-Range"), range.start, range.end)
                 val body = response.body ?: throw IOException("Empty response body")
-                val expected = end - start + 1
+                val expected = range.end - range.start + 1
                 var written = 0L
-                var position = start
+                var position = range.start
 
                 body.byteStream().use { input ->
-                    val buffer = ByteArray(64 * 1024)
                     while (written < expected) {
                         currentCoroutineContext().ensureActive()
                         val want = minOf(buffer.size.toLong(), expected - written).toInt()
@@ -385,7 +419,9 @@ class DownloadTask(
                 }
 
                 if (written != expected) {
-                    throw IOException("Short chunk $index: $written/$expected bytes")
+                    throw IOException(
+                        "Short range ${range.start}-${range.end}: $written/$expected bytes",
+                    )
                 }
             }
         } catch (e: Throwable) {
@@ -408,7 +444,8 @@ class DownloadTask(
         }
     }
 
-    /** Used when the server ignores Range requests or the size is unknown. */    private suspend fun runSingle(part: File) = coroutineScope {
+    /** Used when the server ignores Range requests or the size is unknown. */
+    private suspend fun runSingle(part: File) = coroutineScope {
         publish(snap(DownloadStatus.RUNNING))
         val ticker = launch {
             while (isActive) {
@@ -433,6 +470,10 @@ class DownloadTask(
                 part.delete()
                 done.set(0)
                 perLinkBytes.values.forEach { it.set(0) }
+                // A restart from byte zero must not inherit the old speed window either.
+                history.clear()
+                historyByLink.clear()
+                perLinkSpeed.clear()
                 val request = Request.Builder().url(url).build()
 
                 clientFor(link).newCall(request).execute().use { response ->
@@ -441,7 +482,7 @@ class DownloadTask(
                     val body = response.body ?: throw IOException("Empty response body")
                     part.outputStream().use { out ->
                         body.byteStream().use { input ->
-                            val buffer = ByteArray(128 * 1024)
+                            val buffer = ByteArray(256 * 1024)
                             while (true) {
                                 currentCoroutineContext().ensureActive()
                                 val read = input.read(buffer)
@@ -491,25 +532,31 @@ class DownloadTask(
 
     private fun sample() {
         val now = System.currentTimeMillis()
-        val current = done.get()
         val perLink = perLinkBytes.mapValues { it.value.get() }
 
-        if (lastSampleAt == 0L) {
-            lastSampleAt = now
-            lastTotal = current
-            lastLinkSample.putAll(perLink)
-            return
-        }
+        record(history, now, done.get())
+        speed = rateOf(history)
 
-        val elapsed = (now - lastSampleAt).coerceAtLeast(1)
-        speed = ((current - lastTotal) * 1000 / elapsed).coerceAtLeast(0)
         perLink.forEach { (id, bytes) ->
-            val before = lastLinkSample[id] ?: 0L
-            perLinkSpeed[id] = (((bytes - before) * 1000) / elapsed).coerceAtLeast(0)
+            record(historyByLink.getOrPut(id) { ArrayDeque() }, now, bytes)
+            perLinkSpeed[id] = rateOf(historyByLink.getValue(id))
         }
-        lastSampleAt = now
-        lastTotal = current
-        lastLinkSample.putAll(perLink)
+        // Forget links that are gone so a re-enabled link does not inherit old samples.
+        historyByLink.keys.retainAll(perLink.keys)
+        perLinkSpeed.keys.retainAll(perLink.keys)
+    }
+
+    private fun record(q: ArrayDeque<Pair<Long, Long>>, now: Long, bytes: Long) {
+        q.addLast(now to bytes)
+        while (q.size > 2 && now - q.first().first > SPEED_WINDOW_MS) q.removeFirst()
+    }
+
+    /** Bytes per second across the whole window, or 0 until there are two samples. */
+    private fun rateOf(q: ArrayDeque<Pair<Long, Long>>): Long {
+        if (q.size < 2) return 0L
+        val elapsed = q.last().first - q.first().first
+        if (elapsed <= 0L) return 0L
+        return ((q.last().second - q.first().second) * 1000 / elapsed).coerceAtLeast(0L)
     }
 
     private fun snap(
@@ -559,11 +606,24 @@ class DownloadTask(
         return if (last.contains('.')) last else "download"
     }
 
+    private class ByteRange(val start: Long, val end: Long)
+
     private companion object {
-        /** Extra passes over chunks that failed, after the main pass. */
+        /** Extra passes over ranges that failed, after the main pass. */
         const val MAX_RETRY_ROUNDS = 3
-        /** Chunks that may fail before any byte arrives before the job is called dead. */
+        /** Ranges that may fail before any byte arrives before the job is called dead. */
         const val ABORT_AFTER_FAILURES = 6
+        /** Floor for one request: small enough that a 0.2 Mbps link cannot hold the tail. */
+        const val MIN_CHUNK_BYTES = 256L * 1024
+        const val MAX_CHUNK_BYTES = 128L * 1024 * 1024
+        /** Aim for about four seconds of transfer per request. */
+        const val CHUNK_SECONDS = 4L
+        /** Fraction of the configured maximum used before a link has a measured speed. */
+        const val PROBE_CHUNK_BYTES = 512L * 1024
+        /** Read buffer per worker, reused across ranges. */
+        const val READ_BUFFER_BYTES = 256 * 1024
+        /** Speed is averaged over this window so the readout does not flicker. */
+        const val SPEED_WINDOW_MS = 2000L
     }
 }
 

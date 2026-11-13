@@ -11,6 +11,8 @@ import android.os.Build
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import okhttp3.ConnectionPool
+import okhttp3.Dispatcher
 import okhttp3.Dns
 import okhttp3.OkHttpClient
 import java.net.InetAddress
@@ -230,7 +232,7 @@ class LinkRegistry(context: Context) {
             title = "Wi-Fi",
             hint = "Your wireless router",
             transports = intArrayOf(NetworkCapabilities.TRANSPORT_WIFI),
-            color = 0xFF34D399,
+            color = 0xFF4EA89A,
             cm = cm,
             initiallyEnabled = prefs.getBoolean("wifi", true),
             offNote = "Wi-Fi is switched off. Android does not let an app switch it on — tap “Turn on Wi-Fi”.",
@@ -242,7 +244,7 @@ class LinkRegistry(context: Context) {
             title = "Mobile data",
             hint = "Carrier connection",
             transports = intArrayOf(NetworkCapabilities.TRANSPORT_CELLULAR),
-            color = 0xFF818CF8,
+            color = 0xFF9C8FD6,
             cm = cm,
             initiallyEnabled = prefs.getBoolean("cellular", false),
             offNote = "Mobile data is not available. Android requires you to turn it on in the system panel.",
@@ -261,7 +263,7 @@ class LinkRegistry(context: Context) {
                 } else {
                     intArrayOf()
                 },
-            color = 0xFFF59E0B,
+            color = 0xFFD8A44C,
             cm = cm,
             initiallyEnabled = prefs.getBoolean("ethernet", true),
             offNote = "No wired adapter. Plug in a USB/OTG Ethernet adapter or a USB-C dock.",
@@ -273,7 +275,7 @@ class LinkRegistry(context: Context) {
             title = "Bluetooth",
             hint = "PAN from a paired phone",
             transports = intArrayOf(NetworkCapabilities.TRANSPORT_BLUETOOTH),
-            color = 0xFF38BDF8,
+            color = 0xFF6DB8C9,
             cm = cm,
             initiallyEnabled = prefs.getBoolean("bluetooth", false),
             offNote = "No Bluetooth PAN. Pair a phone that shares its connection, then turn on internet access for it in Bluetooth settings.",
@@ -353,12 +355,22 @@ private class NetworkDns(private val network: Network) : Dns {
 fun clientFor(network: Network): OkHttpClient = OkHttpClient.Builder()
     .socketFactory(BoundSocketFactory(network))
     .dns(NetworkDns(network))
+    // Each client belongs to exactly one network, so its pool can never hand a Wi-Fi
+    // socket to the cellular link. A deep pool keeps every chunk on a warm connection;
+    // a fresh TCP+TLS handshake per chunk would waste a full round trip each time.
+    .connectionPool(ConnectionPool(16, 5, TimeUnit.MINUTES))
+    .dispatcher(
+        Dispatcher().apply {
+            maxRequests = 64
+            maxRequestsPerHost = 64
+        },
+    )
     .addInterceptor { chain ->
         // identity encoding is important: a gzipped range no longer matches the file
         // offsets we write to. A User-Agent also keeps picky CDNs from refusing us.
         chain.proceed(
             chain.request().newBuilder()
-                .header("User-Agent", "Plexo/0.2 (+https://github.com/Rezerox39/plexo-android)")
+                .header("User-Agent", "Plexo/0.3 (+https://github.com/Rezerox39/plexo-android)")
                 .header("Accept-Encoding", "identity")
                 .build(),
         )

@@ -65,7 +65,7 @@ class DownloadService : Service() {
                     repo.start(
                         url = url,
                         name = intent.getStringExtra(EXTRA_NAME),
-                        streams = intent.getIntExtra(EXTRA_STREAMS, 3),
+                        streams = intent.getIntExtra(EXTRA_STREAMS, 4),
                         chunkSize = intent.getLongExtra(EXTRA_CHUNK, 8L * 1024 * 1024),
                     )
                 }

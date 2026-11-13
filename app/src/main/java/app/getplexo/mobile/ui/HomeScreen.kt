@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.provider.Settings
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -52,8 +53,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke as StrokeStyle
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -67,6 +71,8 @@ import app.getplexo.mobile.core.LinkProgress
 import app.getplexo.mobile.core.LinkState
 import java.util.Locale
 import kotlin.math.roundToInt
+
+private const val VERSION = "0.3.0"
 
 @Composable
 fun HomeScreen(
@@ -109,8 +115,8 @@ fun HomeScreen(
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
             .windowInsetsPadding(WindowInsets.safeDrawing)
-            .padding(horizontal = 18.dp, vertical = 14.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Header()
 
@@ -156,41 +162,82 @@ fun HomeScreen(
         TuningPanel(vm)
         LimitsPanel()
 
-        Spacer(Modifier.height(10.dp))
+        Spacer(Modifier.height(4.dp))
         Text(
-            text = "Plexo 0.2.2 · open source, no servers, no VPN",
-            style = MaterialTheme.typography.bodySmall,
-            color = TextMuted.copy(alpha = 0.7f),
+            text = "Plexo $VERSION · open source, no servers, no VPN",
+            style = MonoSmall,
+            color = TextFaint,
         )
+    }
+}
+
+/** The desktop app's mark: three network lines merging into one node and arrow. */
+@Composable
+private fun PlexoMark(modifier: Modifier = Modifier) {
+    Canvas(modifier) {
+        val w = size.width
+        val h = size.height
+        val cx = w * 0.55f
+        val cy = h * 0.5f
+        val stroke = w * 0.075f
+
+        fun merge(color: Color, at: Float) {
+            val path = Path().apply {
+                moveTo(w * 0.05f, h * at)
+                cubicTo(w * 0.32f, h * at, w * 0.34f, cy, cx, cy)
+            }
+            drawPath(path, color, style = StrokeStyle(width = stroke, cap = StrokeCap.Round))
+        }
+
+        merge(Mint, 0.27f)
+        drawLine(
+            color = Amber,
+            start = Offset(w * 0.05f, cy),
+            end = Offset(cx, cy),
+            strokeWidth = stroke,
+            cap = StrokeCap.Round,
+        )
+        merge(Steel, 0.73f)
+
+        drawCircle(
+            color = TextPrimary,
+            radius = w * 0.17f,
+            center = Offset(cx, cy),
+            style = StrokeStyle(width = stroke * 0.5f),
+        )
+        val arrow = Path().apply {
+            moveTo(cx, cy - h * 0.14f)
+            lineTo(w * 0.94f, cy)
+            lineTo(cx, cy + h * 0.14f)
+            close()
+        }
+        drawPath(arrow, TextPrimary)
     }
 }
 
 @Composable
 private fun Header() {
-    Row(verticalAlignment = Alignment.CenterVertically) {
+    Column {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            PlexoMark(Modifier.size(34.dp))
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text("Plexo", style = MaterialTheme.typography.headlineSmall, color = TextPrimary)
+                Text(
+                    text = "One file, every link at once",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextFaint,
+                )
+            }
+            Text(VERSION, style = MonoSmall, color = TextFaint)
+        }
+        Spacer(Modifier.height(12.dp))
         Box(
-            modifier = Modifier
-                .size(42.dp)
-                .clip(RoundedCornerShape(13.dp))
-                .background(Brush.linearGradient(listOf(Mint, Violet))),
-        ) {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.Center)
-                    .size(15.dp)
-                    .clip(CircleShape)
-                    .background(Ink),
-            )
-        }
-        Spacer(Modifier.width(13.dp))
-        Column {
-            Text("Plexo", style = MaterialTheme.typography.headlineSmall, color = TextPrimary)
-            Text(
-                text = "One file, every link at once",
-                style = MaterialTheme.typography.bodySmall,
-                color = TextMuted,
-            )
-        }
+            Modifier
+                .fillMaxWidth()
+                .height(1.dp)
+                .background(Stroke),
+        )
     }
 }
 
@@ -210,17 +257,17 @@ private fun LinkPanel(
             Text(
                 text = "LINKS",
                 style = MaterialTheme.typography.labelSmall,
-                color = TextMuted,
+                color = TextFaint,
             )
             Spacer(Modifier.weight(1f))
             Text(
-                text = if (active > 1) "$active bonded" else "$active active",
-                style = MaterialTheme.typography.bodySmall,
-                color = if (active > 1) Mint else TextMuted,
+                text = if (active > 1) "$active BONDED" else "$active ACTIVE",
+                style = MaterialTheme.typography.labelSmall,
+                color = if (active > 1) Mint else TextFaint,
             )
         }
 
-        Spacer(Modifier.height(6.dp))
+        Spacer(Modifier.height(4.dp))
 
         rows.forEachIndexed { index, (link, state) ->
             if (index > 0) {
@@ -228,7 +275,7 @@ private fun LinkPanel(
                     Modifier
                         .fillMaxWidth()
                         .height(1.dp)
-                        .background(Stroke),
+                        .background(StrokeSubtle),
                 )
             }
             val progress = download?.links?.firstOrNull { it.id == link.id }
@@ -256,7 +303,7 @@ private fun LinkRow(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 10.dp),
+            .padding(vertical = 9.dp),
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -264,11 +311,11 @@ private fun LinkRow(
         ) {
             Box(
                 Modifier
-                    .size(9.dp)
+                    .size(8.dp)
                     .clip(CircleShape)
-                    .background(Color(link.color).copy(alpha = if (state.connected) 1f else 0.3f)),
+                    .background(Color(link.color).copy(alpha = if (state.connected) 1f else 0.32f)),
             )
-            Spacer(Modifier.width(12.dp))
+            Spacer(Modifier.width(11.dp))
 
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -281,7 +328,7 @@ private fun LinkRow(
                         Spacer(Modifier.width(8.dp))
                         Text(
                             text = formatRate(progress.speedBps),
-                            style = MaterialTheme.typography.bodySmall,
+                            style = MonoSmall,
                             color = Color(link.color),
                         )
                     }
@@ -300,11 +347,11 @@ private fun LinkRow(
                 checked = state.enabled,
                 onCheckedChange = onToggle,
                 colors = SwitchDefaults.colors(
-                    checkedThumbColor = Ink,
-                    checkedTrackColor = Mint,
-                    uncheckedThumbColor = TextMuted,
+                    checkedThumbColor = Color(0xFF1B1408),
+                    checkedTrackColor = Amber,
+                    uncheckedThumbColor = TextFaint,
                     uncheckedTrackColor = PanelRaised,
-                    uncheckedBorderColor = Stroke,
+                    uncheckedBorderColor = StrokeStrong,
                 ),
             )
         }
@@ -320,7 +367,7 @@ private fun LinkRow(
                 Text(
                     text = action,
                     style = MaterialTheme.typography.bodySmall,
-                    color = Mint,
+                    color = Amber,
                 )
             }
         }
@@ -337,11 +384,11 @@ private fun NewDownloadPanel(
 ) {
     PanelCard {
         Text(
-            text = "New download",
-            style = MaterialTheme.typography.titleMedium,
-            color = TextPrimary,
+            text = "NEW DOWNLOAD",
+            style = MaterialTheme.typography.labelSmall,
+            color = TextFaint,
         )
-        Spacer(Modifier.height(4.dp))
+        Spacer(Modifier.height(6.dp))
         Text(
             text = "Paste a direct link. Plexo splits the file into byte ranges and fetches them from every link that is on.",
             style = MaterialTheme.typography.bodySmall,
@@ -354,8 +401,15 @@ private fun NewDownloadPanel(
             onValueChange = onUrlChange,
             modifier = Modifier.fillMaxWidth(),
             singleLine = true,
-            shape = RoundedCornerShape(14.dp),
-            placeholder = { Text("https://example.com/file.iso") },
+            shape = RoundedCornerShape(8.dp),
+            textStyle = MaterialTheme.typography.bodyMedium,
+            placeholder = {
+                Text(
+                    "https://example.com/file.iso",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = TextFaint,
+                )
+            },
             keyboardOptions = KeyboardOptions(
                 keyboardType = KeyboardType.Uri,
                 imeAction = ImeAction.Go,
@@ -363,13 +417,13 @@ private fun NewDownloadPanel(
             colors = OutlinedTextFieldDefaults.colors(
                 focusedTextColor = TextPrimary,
                 unfocusedTextColor = TextPrimary,
-                cursorColor = Mint,
-                focusedBorderColor = Mint,
-                unfocusedBorderColor = Stroke,
+                cursorColor = Amber,
+                focusedBorderColor = Amber,
+                unfocusedBorderColor = StrokeStrong,
                 focusedContainerColor = PanelRaised,
                 unfocusedContainerColor = PanelRaised,
-                focusedPlaceholderColor = TextMuted,
-                unfocusedPlaceholderColor = TextMuted,
+                focusedPlaceholderColor = TextFaint,
+                unfocusedPlaceholderColor = TextFaint,
             ),
         )
 
@@ -382,17 +436,19 @@ private fun NewDownloadPanel(
             )
         }
 
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(10.dp))
         Button(
             onClick = onStart,
             enabled = !busy && url.isNotBlank(),
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(14.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(44.dp),
+            shape = RoundedCornerShape(8.dp),
             colors = ButtonDefaults.buttonColors(
-                containerColor = Mint,
-                contentColor = Ink,
+                containerColor = Amber,
+                contentColor = Color(0xFF1B1408),
                 disabledContainerColor = PanelRaised,
-                disabledContentColor = TextMuted,
+                disabledContentColor = TextFaint,
             ),
         ) {
             Text(
@@ -413,81 +469,112 @@ private fun DownloadPanel(
     val running = !snapshot.status.finished
     PanelCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text(
-                    text = snapshot.name.ifBlank { "Preparing…" },
-                    style = MaterialTheme.typography.titleMedium,
-                    color = TextPrimary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Text(
-                    text = statusLine(snapshot),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = TextMuted,
-                )
-            }
+            Text(
+                text = "DOWNLOAD",
+                style = MaterialTheme.typography.labelSmall,
+                color = TextFaint,
+            )
+            Spacer(Modifier.weight(1f))
             if (running) {
                 Text(
                     text = "${(snapshot.fraction * 100).roundToInt()}%",
-                    style = MaterialTheme.typography.titleMedium,
-                    color = Mint,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = Amber,
                 )
             }
         }
 
+        Spacer(Modifier.height(8.dp))
+        Text(
+            text = snapshot.name.ifBlank { "Preparing…" },
+            style = MaterialTheme.typography.titleMedium,
+            color = TextPrimary,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Text(
+            text = statusLine(snapshot),
+            style = MonoSmall,
+            color = TextFaint,
+        )
+
         Spacer(Modifier.height(14.dp))
+
+        Row(verticalAlignment = Alignment.Bottom) {
+            Column {
+                Text(
+                    text = "SPEED",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = TextFaint,
+                )
+                Row(verticalAlignment = Alignment.Bottom) {
+                    Text(
+                        text = speedValue(snapshot.speedBps),
+                        style = MaterialTheme.typography.displaySmall,
+                        color = if (snapshot.speedBps > 0) Amber else TextMuted,
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        text = speedUnit(snapshot.speedBps),
+                        style = MonoSmall,
+                        color = TextFaint,
+                        modifier = Modifier.padding(bottom = 4.dp),
+                    )
+                }
+            }
+            Spacer(Modifier.weight(1f))
+            Column(horizontalAlignment = Alignment.End) {
+                Text(
+                    text = "DONE",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = TextFaint,
+                )
+                Text(
+                    text = formatBytes(snapshot.bytesDone),
+                    style = MonoMedium,
+                    color = TextPrimary,
+                )
+                if (snapshot.totalBytes > 0) {
+                    Text(
+                        text = "of ${formatBytes(snapshot.totalBytes)}",
+                        style = MonoSmall,
+                        color = TextFaint,
+                    )
+                }
+            }
+        }
+
+        Spacer(Modifier.height(8.dp))
+
+        snapshot.etaSeconds?.let { eta ->
+            Text(
+                text = "ETA ${formatEta(eta)}" +
+                    if (snapshot.links.isNotEmpty()) " · ${snapshot.links.size} links" else "",
+                style = MonoSmall,
+                color = TextMuted,
+            )
+            Spacer(Modifier.height(8.dp))
+        }
 
         if (snapshot.totalBytes > 0) {
             LinearProgressIndicator(
                 progress = { snapshot.fraction },
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(7.dp)
-                    .clip(RoundedCornerShape(4.dp)),
-                color = Mint,
-                trackColor = PanelRaised,
+                    .height(6.dp)
+                    .clip(RoundedCornerShape(3.dp)),
+                color = Amber,
+                trackColor = Track,
             )
         } else {
             LinearProgressIndicator(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(7.dp)
-                    .clip(RoundedCornerShape(4.dp)),
-                color = Mint,
-                trackColor = PanelRaised,
+                    .height(6.dp)
+                    .clip(RoundedCornerShape(3.dp)),
+                color = Amber,
+                trackColor = Track,
             )
-        }
-
-        Spacer(Modifier.height(10.dp))
-
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                text = buildString {
-                    append(formatBytes(snapshot.bytesDone))
-                    if (snapshot.totalBytes > 0) {
-                        append(" / ")
-                        append(formatBytes(snapshot.totalBytes))
-                    }
-                },
-                style = MaterialTheme.typography.bodySmall,
-                color = TextMuted,
-            )
-            Spacer(Modifier.weight(1f))
-            if (snapshot.speedBps > 0) {
-                Text(
-                    text = formatRate(snapshot.speedBps),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Mint,
-                )
-                snapshot.etaSeconds?.let { eta ->
-                    Text(
-                        text = "  ·  ${formatEta(eta)} left",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = TextMuted,
-                    )
-                }
-            }
         }
 
         if (snapshot.links.isNotEmpty()) {
@@ -504,7 +591,7 @@ private fun DownloadPanel(
                 ) {
                     Box(
                         Modifier
-                            .size(8.dp)
+                            .size(7.dp)
                             .clip(CircleShape)
                             .background(Color(link?.color ?: 0xFFFFFFFF)),
                     )
@@ -517,7 +604,7 @@ private fun DownloadPanel(
                     )
                     Text(
                         text = "${formatBytes(progress.bytes)}  ·  ${formatRate(progress.speedBps)}",
-                        style = MaterialTheme.typography.bodySmall,
+                        style = MonoSmall,
                         color = TextPrimary,
                     )
                 }
@@ -551,13 +638,15 @@ private fun DownloadPanel(
             )
         }
 
-        Spacer(Modifier.height(14.dp))
+        Spacer(Modifier.height(12.dp))
         if (running) {
             OutlinedButton(
                 onClick = onCancel,
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(14.dp),
-                border = BorderStroke(1.dp, Stroke),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(42.dp),
+                shape = RoundedCornerShape(8.dp),
+                border = BorderStroke(1.dp, StrokeStrong),
                 colors = ButtonDefaults.outlinedButtonColors(contentColor = TextMuted),
             ) {
                 Text("Cancel", style = MaterialTheme.typography.titleSmall)
@@ -577,9 +666,9 @@ private fun SplitBar(snapshot: DownloadSnapshot, links: List<Link>) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .height(7.dp)
-            .clip(RoundedCornerShape(4.dp))
-            .background(PanelRaised),
+            .height(6.dp)
+            .clip(RoundedCornerShape(3.dp))
+            .background(Track),
     ) {
         segments.forEach { progress ->
             val color = links.firstOrNull { it.id == progress.id }?.color
@@ -602,7 +691,7 @@ private fun TuningPanel(vm: PlexoViewModel) {
         Text(
             text = "TUNING",
             style = MaterialTheme.typography.labelSmall,
-            color = TextMuted,
+            color = TextFaint,
         )
         Spacer(Modifier.height(10.dp))
 
@@ -615,8 +704,8 @@ private fun TuningPanel(vm: PlexoViewModel) {
             )
             Text(
                 text = "$streams",
-                style = MaterialTheme.typography.titleSmall,
-                color = Mint,
+                style = MaterialTheme.typography.labelMedium,
+                color = Amber,
             )
         }
         Slider(
@@ -628,23 +717,23 @@ private fun TuningPanel(vm: PlexoViewModel) {
             valueRange = 1f..8f,
             steps = 6,
             colors = SliderDefaults.colors(
-                thumbColor = Mint,
-                activeTrackColor = Mint,
-                inactiveTrackColor = PanelRaised,
+                thumbColor = Amber,
+                activeTrackColor = Amber,
+                inactiveTrackColor = Track,
             ),
         )
 
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
-                text = "Chunk size",
+                text = "Maximum chunk size",
                 style = MaterialTheme.typography.bodyMedium,
                 color = TextPrimary,
                 modifier = Modifier.weight(1f),
             )
             Text(
                 text = "$chunk MB",
-                style = MaterialTheme.typography.titleSmall,
-                color = Mint,
+                style = MaterialTheme.typography.labelMedium,
+                color = Amber,
             )
         }
         Slider(
@@ -656,14 +745,14 @@ private fun TuningPanel(vm: PlexoViewModel) {
             valueRange = 1f..32f,
             steps = 30,
             colors = SliderDefaults.colors(
-                thumbColor = Mint,
-                activeTrackColor = Mint,
-                inactiveTrackColor = PanelRaised,
+                thumbColor = Amber,
+                activeTrackColor = Amber,
+                inactiveTrackColor = Track,
             ),
         )
 
         Text(
-            text = "More connections help on high-latency links. Bigger chunks mean fewer requests.",
+            text = "Plexo sizes each request from the link's own measured speed: fast radios get big ranges, slow ones get small ones, so a Bluetooth link cannot hold the tail of the file. The slider sets the upper limit.",
             style = MaterialTheme.typography.bodySmall,
             color = TextMuted,
         )
@@ -676,7 +765,7 @@ private fun LimitsPanel() {
         Text(
             text = "WHAT ANDROID ALLOWS",
             style = MaterialTheme.typography.labelSmall,
-            color = TextMuted,
+            color = TextFaint,
         )
         Spacer(Modifier.height(10.dp))
         Bullet("Android does not let an app switch Wi-Fi or mobile data on or off. The switches here pick which links Plexo may use; when a radio is off, Plexo shows a shortcut to the system panel that owns it.")
@@ -695,9 +784,9 @@ private fun Bullet(text: String) {
         Box(
             Modifier
                 .padding(top = 6.dp)
-                .size(4.dp)
+                .size(3.dp)
                 .clip(CircleShape)
-                .background(Mint.copy(alpha = 0.7f)),
+                .background(TextFaint),
         )
         Spacer(Modifier.width(10.dp))
         Text(
@@ -716,10 +805,10 @@ private fun PanelCard(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(22.dp))
+            .clip(RoundedCornerShape(8.dp))
             .background(Panel)
-            .border(1.dp, Stroke, RoundedCornerShape(22.dp))
-            .padding(18.dp),
+            .border(1.dp, Stroke, RoundedCornerShape(8.dp))
+            .padding(16.dp),
         content = content,
     )
 }
@@ -785,6 +874,13 @@ private fun statusLine(snapshot: DownloadSnapshot): String = when (snapshot.stat
     DownloadStatus.ERROR -> "Failed"
     DownloadStatus.CANCELLED -> "Cancelled"
 }
+
+/** "12.3 MB/s" -> "12.3" and "MB/s", so the number can be set in the display face. */
+private fun speedValue(bytesPerSecond: Long): String =
+    formatBytes(bytesPerSecond).substringBeforeLast(' ')
+
+private fun speedUnit(bytesPerSecond: Long): String =
+    formatBytes(bytesPerSecond).substringAfterLast(' ', "B") + "/s"
 
 fun formatBytes(value: Long): String {
     if (value <= 0) return "0 B"

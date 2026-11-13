@@ -5,9 +5,12 @@ network link the phone has on at the same time** — Wi-Fi plus mobile data plus
 Bluetooth PAN plus a USB/OTG Ethernet adapter — and fetches the chunks in parallel.
 
 It is an Android take on [anmolkapil/plexo](https://github.com/anmolkapil/plexo),
-which does the same thing on desktop. Same core idea: no VPN, no virtual adapter,
-no server. Each connection downloads a different `Range` of the file, and the
-parts are written into one file at their offsets.
+which does the same thing on desktop. Same core idea — no VPN, no virtual adapter,
+no server — and the same look: the graphite panel, warm off-white type, amber
+accent and the teal/amber/steel link colours are taken from the desktop app, along
+with its Manrope + Roboto Mono typography and its merge-node mark. Each connection
+downloads a different `Range` of the file, and the parts are written into one file
+at their offsets.
 
 ---
 
@@ -82,12 +85,21 @@ like bonding while adding no bandwidth, and the UI says so instead.
   so immediately and offers a button that opens the right system panel. The
   network request stays registered, so the link joins as soon as the radio
   comes up, without a restart or a retry wait.
-- **Parallel chunked downloader** — probes the server, honours `Accept-Ranges`,
-  works out the file name from `Content-Disposition`, splits the file into chunks
-  and lets all links pull from one shared cursor. Faster links simply take more
-  chunks; no manual percentage split.
+- **Adaptive parallel downloader** — probes the server, honours `Accept-Ranges`,
+  works out the file name from `Content-Disposition`, and lets all links pull ranges
+  from one shared byte cursor. Each request is sized from that link's own measured
+  speed (about four seconds of work, 256 KB floor): a fast radio gets large ranges,
+  a Bluetooth link gets small ones, so a slow link can never grab a big chunk and
+  then hold the tail of the file while everything else has finished. Speeds are
+  averaged over a rolling two-second window, so the readout does not flicker with
+  the modem's burst/sleep cycle. Connections are pooled per link, so chunks reuse
+  warm TCP/TLS sessions instead of paying a handshake each time.
 - **Live split view** — total speed, ETA, and bytes/speed per link, plus a stacked
   bar showing each link's share of the file.
+- **Desktop-matched theme** — exact palette from the Plexo renderer (`#1B1E20`
+  graphite, `#202325` panels, `#EAE7E2` warm text, `#D8A44C` amber), 8 dp flat
+  cards, tracked-out mono section labels and tabular numbers. The launcher icon and
+  in-app mark are the desktop's three converging network lines and white arrow.
 - **Graceful fallback** — a server that ignores `Range` gets a single-stream
   download and a clear note in the UI.
 - **Foreground service** — progress notification with cancel, survives leaving
@@ -98,7 +110,7 @@ like bonding while adding no bandwidth, and the UI says so instead.
 
 ## Install
 
-Grab `plexo-0.2.2-debug.apk` from the [latest release](../../releases/latest) and open it
+Grab `plexo-0.3.0-debug.apk` from the [latest release](../../releases/latest) and open it
 on the phone. It is debug-signed, so Android asks you to allow installing from your
 browser or file manager the first time.
 
@@ -154,8 +166,11 @@ ConnectivityManager.requestNetwork(ETHERNET | USB)       -> Network D  (eth0)
 
 probe:  GET Range: bytes=0-0        -> size, Accept-Ranges, filename
 
-chunks: [0..8MB) [8..16MB) [16..24MB) ...   one shared cursor
-        worker(link A) x3  worker(link B) x3  worker(link C) x3
+ranges: shared AtomicLong byte cursor; each request sized per link
+        fast link  -> up to 8 MB   (few round trips)
+        slow link  -> 256 KB       (cannot hold the tail)
+
+        worker(link A) x4  worker(link B) x4  worker(link C) x4
         each: GET Range: bytes=<start>-<end>  via client pinned to its Network
               FileChannel.write(buffer, position)   // thread-safe positional write
 
@@ -167,16 +182,17 @@ Key files:
 | Path | Role |
 | --- | --- |
 | `core/Links.kt` | Network requests, link state, `BoundSocketFactory`, per-network DNS and OkHttp clients |
-| `core/Downloads.kt` | Probe, chunk planner, work-stealing workers, retries, progress maths, repository |
+| `core/Downloads.kt` | Probe, adaptive range planner, work-stealing workers, retries, progress maths, repository |
 | `core/Store.kt` | MediaStore hand-off |
 | `service/DownloadService.kt` | Foreground service and notification |
 | `ui/HomeScreen.kt` | Compose UI: links, new download, live split, tuning |
 
-Error handling: a chunk that fails is retried up to six times on another link; a
-link that fails three times is taken out of rotation for that download; the whole
-job only fails when every link is unusable. Subtly, this means unplugging the
-Ethernet adapter mid-download costs you nothing — its remaining chunks are simply
-picked up by Wi-Fi.
+Error handling: a range that fails is retried up to six times on another link; a
+link that fails three times is taken out of rotation for that download; leftover
+ranges get up to three extra passes after the main pass; the whole job only fails
+when every link is unusable. Subtly, this means unplugging the Ethernet adapter
+mid-download costs you nothing — its remaining ranges are simply picked up by
+Wi-Fi, and a partly written range is re-fetched and counted once.
 
 ## Not in this build
 
@@ -193,4 +209,6 @@ Deliberately out of scope for a first version, in order of usefulness:
 ## Licence
 
 The Android implementation here is original code. Upstream Plexo is MIT licensed;
-keep its copyright notice if you reuse any of its assets or code.
+keep its copyright notice if you reuse any of its assets or code. Manrope and
+Roboto Mono are bundled under the SIL Open Font License; the licence texts ship in
+`app/src/main/assets/licenses/`.

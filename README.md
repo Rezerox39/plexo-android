@@ -2,7 +2,7 @@
 
 A native Android download manager that splits one file's byte ranges across **every
 network link the phone has on at the same time** — Wi-Fi plus mobile data plus a
-USB/OTG Ethernet adapter — and fetches the chunks in parallel.
+Bluetooth PAN plus a USB/OTG Ethernet adapter — and fetches the chunks in parallel.
 
 It is an Android take on [anmolkapil/plexo](https://github.com/anmolkapil/plexo),
 which does the same thing on desktop. Same core idea: no VPN, no virtual adapter,
@@ -30,7 +30,8 @@ claiming otherwise would be a lie.
 | --- | --- |
 | Wi-Fi | Normal traffic |
 | Mobile data | Runs at the same time as Wi-Fi, on its own radio |
-| USB/OTG Ethernet | Third radio, wired and usually fast |
+| Bluetooth | PAN through a paired phone that shares its connection; slow but independent |
+| Wired / USB | USB/OTG Ethernet adapter or USB-C dock, usually the fastest link |
 
 Android lets an app call `ConnectivityManager.requestNetwork()` for a transport
 that is *not* the default network, and then bind its own sockets to that network
@@ -43,10 +44,39 @@ Aggregating *all* apps would require a VPN service plus a relay server on the
 other side (that is how Speedify works). That is a different product with
 ongoing server cost; it is not this build.
 
+### Bluetooth PAN
+
+When the phone is connected to another device's Bluetooth PAN, Android exposes it
+as a network with `TRANSPORT_BLUETOOTH` (interface `bt-pan`), and Plexo can bind
+downloads to it. Two honest limits:
+
+- Android gives apps no API to *start* a PAN connection. Pair the sharing phone
+  in system Bluetooth settings, tap the gear next to it and allow internet access;
+  the app shows an **Open Bluetooth settings** button while the link is waiting.
+- Bluetooth PAN tops out around 1–2 Mbps. It is a genuine extra pipe, but a small
+  one: useful on a bad Wi-Fi link, never a big speed-up.
+
+### USB tethering
+
+There are two directions, and only one of them is possible:
+
+- **Phone as host (works):** a USB-C dock or USB/OTG Ethernet adapter gives the
+  phone a real Ethernet interface (`eth0`). The **Wired / USB** link requests both
+  `TRANSPORT_ETHERNET` and, on Android 12+, `TRANSPORT_USB`, so docks and adapters
+  are picked up whichever way the OEM labels them.
+- **Phone as client (does not work):** stock Android cannot consume internet from
+  a computer over a USB cable. That is "reverse tethering", which only exists as
+  adb/root hacks. The phone's USB stack implements the tethering *host* side, so
+  there is nothing for a normal app to request.
+
+One more safety rule: if two links are handed networks on the same kernel
+interface, Plexo counts only one of them. Two requests over one pipe would look
+like bonding while adding no bandwidth, and the UI says so instead.
+
 ## Screens and features
 
-- **Links panel** — Wi-Fi, Mobile data and USB Ethernet with live state, and a
-  switch per link. Toggles persist across launches.
+- **Links panel** — Wi-Fi, Mobile data, Bluetooth PAN and Wired/USB with live
+  state, and a switch per link. Toggles persist across launches.
 - **Parallel chunked downloader** — probes the server, honours `Accept-Ranges`,
   works out the file name from `Content-Disposition`, splits the file into chunks
   and lets all links pull from one shared cursor. Faster links simply take more
@@ -60,6 +90,12 @@ ongoing server cost; it is not this build.
 - **Saves into `Download/Plexo`** through MediaStore, so no storage permission is
   needed on Android 10+.
 - **Share to Plexo** — send a link from any browser via the Android share sheet.
+
+## Install
+
+Grab `plexo-0.2.0-debug.apk` from the [latest release](../../releases/latest) and open it
+on the phone. It is debug-signed, so Android asks you to allow installing from your
+browser or file manager the first time.
 
 ## Build
 
@@ -106,9 +142,10 @@ Caveats worth knowing:
 ## How it works
 
 ```
-ConnectivityManager.requestNetwork(TRANSPORT_WIFI)     -> Network A
-ConnectivityManager.requestNetwork(TRANSPORT_CELLULAR) -> Network B
-ConnectivityManager.requestNetwork(TRANSPORT_ETHERNET) -> Network C
+ConnectivityManager.requestNetwork(TRANSPORT_WIFI)       -> Network A
+ConnectivityManager.requestNetwork(TRANSPORT_CELLULAR)   -> Network B
+ConnectivityManager.requestNetwork(TRANSPORT_BLUETOOTH)  -> Network C  (bt-pan)
+ConnectivityManager.requestNetwork(ETHERNET | USB)       -> Network D  (eth0)
 
 probe:  GET Range: bytes=0-0        -> size, Accept-Ranges, filename
 

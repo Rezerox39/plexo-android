@@ -1,5 +1,7 @@
 package app.getplexo.mobile.ui
 
+import android.content.Intent
+import android.provider.Settings
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -7,6 +9,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -49,6 +52,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
@@ -71,6 +75,18 @@ fun HomeScreen(
     val download by vm.download.collectAsStateWithLifecycle()
     val links = vm.links
     val states = links.map { it to it.state.collectAsStateWithLifecycle().value }
+    val context = LocalContext.current
+
+    // A link that landed on an interface another link already uses adds no bandwidth.
+    // Mark it so the panel does not claim bonding that is not real.
+    val duplicateIds = buildSet {
+        val seen = HashSet<String>()
+        states.forEach { (link, state) ->
+            if (!state.enabled) return@forEach
+            val key = state.networkKey ?: return@forEach
+            if (!seen.add(key)) add(link.id)
+        }
+    }
 
     var url by rememberSaveable { mutableStateOf(initialUrl.orEmpty()) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -98,8 +114,12 @@ fun HomeScreen(
 
         LinkPanel(
             rows = states,
+            duplicates = duplicateIds,
             download = download,
             onToggle = { id, on -> vm.setLinkEnabled(id, on) },
+            onOpenBluetoothSettings = {
+                runCatching { context.startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS)) }
+            },
         )
 
         NewDownloadPanel(
@@ -131,7 +151,7 @@ fun HomeScreen(
 
         Spacer(Modifier.height(10.dp))
         Text(
-            text = "Plexo 0.1 · open source, no servers, no VPN",
+            text = "Plexo 0.2 · open source, no servers, no VPN",
             style = MaterialTheme.typography.bodySmall,
             color = TextMuted.copy(alpha = 0.7f),
         )
@@ -170,10 +190,14 @@ private fun Header() {
 @Composable
 private fun LinkPanel(
     rows: List<Pair<Link, LinkState>>,
+    duplicates: Set<String>,
     download: DownloadSnapshot?,
     onToggle: (String, Boolean) -> Unit,
+    onOpenBluetoothSettings: () -> Unit,
 ) {
-    val active = rows.count { it.second.enabled && it.second.connected }
+    val active = rows.count { (link, state) ->
+        state.enabled && state.connected && link.id !in duplicates
+    }
     PanelCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
@@ -205,7 +229,9 @@ private fun LinkPanel(
                 link = link,
                 state = state,
                 progress = progress,
+                duplicate = link.id in duplicates,
                 onToggle = { onToggle(link.id, it) },
+                onOpenBluetoothSettings = onOpenBluetoothSettings,
             )
         }
     }
@@ -216,59 +242,80 @@ private fun LinkRow(
     link: Link,
     state: LinkState,
     progress: LinkProgress?,
+    duplicate: Boolean,
     onToggle: (Boolean) -> Unit,
+    onOpenBluetoothSettings: () -> Unit,
 ) {
-    Row(
+    Column(
         modifier = Modifier
             .fillMaxWidth()
             .padding(vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Box(
-            Modifier
-                .size(9.dp)
-                .clip(CircleShape)
-                .background(Color(link.color).copy(alpha = if (state.connected) 1f else 0.3f)),
-        )
-        Spacer(Modifier.width(12.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                Modifier
+                    .size(9.dp)
+                    .clip(CircleShape)
+                    .background(Color(link.color).copy(alpha = if (state.connected) 1f else 0.3f)),
+            )
+            Spacer(Modifier.width(12.dp))
 
-        Column(Modifier.weight(1f)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = link.title,
-                    style = MaterialTheme.typography.titleSmall,
-                    color = TextPrimary,
-                )
-                if (progress != null && progress.bytes > 0) {
-                    Spacer(Modifier.width(8.dp))
+            Column(Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        text = formatRate(progress.speedBps),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = Color(link.color),
+                        text = link.title,
+                        style = MaterialTheme.typography.titleSmall,
+                        color = TextPrimary,
                     )
+                    if (progress != null && progress.bytes > 0) {
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = formatRate(progress.speedBps),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color(link.color),
+                        )
+                    }
                 }
+                Text(
+                    text = statusText(state, duplicate),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextMuted,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
-            Text(
-                text = statusText(state),
-                style = MaterialTheme.typography.bodySmall,
-                color = TextMuted,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
+
+            Spacer(Modifier.width(10.dp))
+            Switch(
+                checked = state.enabled,
+                onCheckedChange = onToggle,
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = Ink,
+                    checkedTrackColor = Mint,
+                    uncheckedThumbColor = TextMuted,
+                    uncheckedTrackColor = PanelRaised,
+                    uncheckedBorderColor = Stroke,
+                ),
             )
         }
 
-        Spacer(Modifier.width(10.dp))
-        Switch(
-            checked = state.enabled,
-            onCheckedChange = onToggle,
-            colors = SwitchDefaults.colors(
-                checkedThumbColor = Ink,
-                checkedTrackColor = Mint,
-                uncheckedThumbColor = TextMuted,
-                uncheckedTrackColor = PanelRaised,
-                uncheckedBorderColor = Stroke,
-            ),
-        )
+        // Android has no API for an app to bring up a Bluetooth PAN by itself: the user
+        // has to allow internet access for the paired device in system settings.
+        if (link.id == "bluetooth" && state.enabled && !state.connected) {
+            TextButton(
+                onClick = onOpenBluetoothSettings,
+                contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp),
+            ) {
+                Text(
+                    text = "Open Bluetooth settings",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Mint,
+                )
+            }
+        }
     }
 }
 
@@ -625,8 +672,10 @@ private fun LimitsPanel() {
         )
         Spacer(Modifier.height(10.dp))
         Bullet("One Wi-Fi radio can only be joined to one network at a time. Two Wi-Fi networks at once is not possible on stock Android.")
-        Bullet("What does work: Wi-Fi + mobile data + USB Ethernet at the same time, each radio carrying different chunks of the same file.")
-        Bullet("Mobile data is off by default here. Switch it on to add its bandwidth.")
+        Bullet("What can run at once: Wi-Fi + mobile data + Bluetooth PAN + a wired/USB adapter, each radio carrying different chunks of the same file.")
+        Bullet("Bluetooth PAN needs a paired device that shares its connection. Android does not let an app start that itself, so pair it and allow internet access in Bluetooth settings. Expect only about 1–2 Mbps.")
+        Bullet("Android cannot consume USB tethering from a laptop — the phone is only ever the tethering host. What the wired link does use is a USB-C dock or a USB/OTG Ethernet adapter.")
+        Bullet("Mobile data and Bluetooth are off by default here. Switch one on to add its bandwidth.")
         Bullet("If mobile data drops while Wi-Fi is on, enable Developer options › Mobile data always active.")
     }
 }
@@ -666,7 +715,8 @@ private fun PanelCard(
     )
 }
 
-private fun statusText(state: LinkState): String = when {
+private fun statusText(state: LinkState, duplicate: Boolean = false): String = when {
+    duplicate -> "Same network as another link · adds no speed"
     !state.enabled -> "Off"
     state.connected && state.validated -> if (state.metered) "Connected · metered" else "Connected"
     state.connected -> "Connected · no internet"

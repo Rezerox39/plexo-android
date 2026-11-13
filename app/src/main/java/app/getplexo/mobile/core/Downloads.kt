@@ -430,9 +430,10 @@ class DownloadTask(
         message: String? = null,
         savedTo: String? = null,
     ): DownloadSnapshot {
+        val active = registry.usable().map { it.id }.toSet()
         val links = registry.links.mapNotNull { link ->
             val bytes = perLinkBytes[link.id]?.get() ?: 0L
-            if (bytes == 0L && !link.usable) {
+            if (bytes == 0L && link.id !in active) {
                 null
             } else {
                 LinkProgress(

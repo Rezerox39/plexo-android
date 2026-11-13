@@ -27,6 +27,12 @@ data class LinkState(
     val metered: Boolean = false,
     val downstreamKbps: Int = 0,
     val note: String? = null,
+    /**
+     * Kernel interface behind the network, e.g. wlan0, rmnet_data0, bt-pan, eth0.
+     * Two links can receive different [android.net.Network] handles for one interface;
+     * comparing this keeps the app from counting the same pipe twice.
+     */
+    val networkKey: String? = null,
 )
 
 /**
@@ -36,15 +42,19 @@ data class LinkState(
  * radio at the same time we have to ask ConnectivityManager for a network of that
  * transport ourselves, then bind every socket we open to the Network object we get
  * back. That is the whole trick behind Plexo on mobile.
+ *
+ * [transports] are OR'd by the platform: a network matches if it has any one of them.
+ * That is how the wired link covers both classic Ethernet adapters and USB networks.
  */
 class Link(
     val id: String,
     val title: String,
     val hint: String,
-    private val transport: Int,
+    private val transports: IntArray,
     val color: Long,
     private val cm: ConnectivityManager,
     initiallyEnabled: Boolean,
+    private val missingNote: String,
 ) {
     private val _state = MutableStateFlow(LinkState(enabled = initiallyEnabled))
     val state: StateFlow<LinkState> = _state.asStateFlow()
@@ -53,6 +63,7 @@ class Link(
     private var callback: ConnectivityManager.NetworkCallback? = null
     private var enabled = initiallyEnabled
     private var retryPending = false
+    private var retryDelayMs = INITIAL_RETRY_MS
 
     @Volatile
     private var network: Network? = null
@@ -62,6 +73,9 @@ class Link(
     }
 
     fun network(): Network? = network
+
+    /** Interface name reported by the OS, or null while the link has no network. */
+    val networkKey: String? get() = _state.value.networkKey
 
     /** True when the user wants this link and the OS has handed us a live network for it. */
     val usable: Boolean get() = enabled && network != null
@@ -73,7 +87,11 @@ class Link(
         callback = null
         network = null
         cb?.let { runCatching { cm.unregisterNetworkCallback(it) } }
+        handler.removeCallbacksAndMessages(null)
+        retryPending = false
         if (on) {
+            retryDelayMs = INITIAL_RETRY_MS
+            _state.value = _state.value.copy(enabled = true, connected = false, note = null)
             request()
         } else {
             _state.value = LinkState(enabled = false)
@@ -81,19 +99,22 @@ class Link(
     }
 
     private fun request() {
-        if (!enabled) return
-        val request = NetworkRequest.Builder()
+        if (!enabled || network != null) return
+
+        val builder = NetworkRequest.Builder()
             .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-            .addTransportType(transport)
-            .build()
+        transports.distinct().forEach { builder.addTransportType(it) }
+        val request = builder.build()
 
         val cb = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
                 this@Link.network = network
+                retryDelayMs = INITIAL_RETRY_MS
                 _state.value = _state.value.copy(
                     enabled = true,
                     connected = true,
                     note = null,
+                    networkKey = keyFor(network),
                 )
             }
 
@@ -102,6 +123,7 @@ class Link(
                 caps: NetworkCapabilities,
             ) {
                 this@Link.network = network
+                retryDelayMs = INITIAL_RETRY_MS
                 _state.value = _state.value.copy(
                     enabled = true,
                     connected = true,
@@ -109,6 +131,7 @@ class Link(
                     metered = !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED),
                     downstreamKbps = caps.linkDownstreamBandwidthKbps,
                     note = null,
+                    networkKey = keyFor(network) ?: _state.value.networkKey,
                 )
             }
 
@@ -117,6 +140,8 @@ class Link(
                 _state.value = _state.value.copy(
                     connected = false,
                     validated = false,
+                    downstreamKbps = 0,
+                    networkKey = null,
                 )
                 // The request itself stays alive, so Android will call onAvailable again
                 // if this transport comes back.
@@ -126,7 +151,7 @@ class Link(
                 _state.value = _state.value.copy(
                     enabled = true,
                     connected = false,
-                    note = unavailableNote(),
+                    note = missingNote,
                 )
                 scheduleRetry()
             }
@@ -142,21 +167,21 @@ class Link(
         }
     }
 
+    private fun keyFor(network: Network): String? =
+        runCatching { cm.getLinkProperties(network)?.interfaceName }.getOrNull()
+            ?: network.toString()
+
     private fun scheduleRetry() {
-        if (retryPending || !enabled) return
+        if (retryPending || !enabled || network != null) return
         retryPending = true
+        val delay = retryDelayMs
+        // An adapter that is not plugged in will not appear for a while: back off so a
+        // forgotten switch does not wake the system every 20 seconds forever.
+        retryDelayMs = (retryDelayMs * 2).coerceAtMost(MAX_RETRY_MS)
         handler.postDelayed({
             retryPending = false
             if (enabled && network == null) request()
-        }, RETRY_DELAY_MS)
-    }
-
-    private fun unavailableNote(): String = when (transport) {
-        NetworkCapabilities.TRANSPORT_CELLULAR ->
-            "No mobile data. Check mobile data is on, and enable Developer options › Mobile data always active."
-        NetworkCapabilities.TRANSPORT_WIFI -> "Not connected to a Wi-Fi network."
-        NetworkCapabilities.TRANSPORT_ETHERNET -> "No USB/OTG Ethernet adapter detected."
-        else -> "Network not available."
+        }, delay)
     }
 
     fun release() {
@@ -170,7 +195,8 @@ class Link(
 
     private companion object {
         const val REQUEST_TIMEOUT_MS = 20_000
-        const val RETRY_DELAY_MS = 20_000L
+        const val INITIAL_RETRY_MS = 20_000L
+        const val MAX_RETRY_MS = 5 * 60_000L
     }
 }
 
@@ -186,28 +212,48 @@ class LinkRegistry(context: Context) {
             id = "wifi",
             title = "Wi-Fi",
             hint = "Your wireless router",
-            transport = NetworkCapabilities.TRANSPORT_WIFI,
+            transports = intArrayOf(NetworkCapabilities.TRANSPORT_WIFI),
             color = 0xFF34D399,
             cm = cm,
             initiallyEnabled = prefs.getBoolean("wifi", true),
+            missingNote = "Not connected to a Wi-Fi network.",
         ),
         Link(
             id = "cellular",
             title = "Mobile data",
             hint = "Carrier connection",
-            transport = NetworkCapabilities.TRANSPORT_CELLULAR,
+            transports = intArrayOf(NetworkCapabilities.TRANSPORT_CELLULAR),
             color = 0xFF818CF8,
             cm = cm,
             initiallyEnabled = prefs.getBoolean("cellular", false),
+            missingNote = "No mobile data. Check mobile data is on, and enable Developer options › Mobile data always active.",
         ),
         Link(
             id = "ethernet",
-            title = "USB Ethernet",
-            hint = "OTG adapter",
-            transport = NetworkCapabilities.TRANSPORT_ETHERNET,
+            title = "Wired / USB",
+            hint = "Ethernet adapter or USB-C dock",
+            transports = intArrayOf(NetworkCapabilities.TRANSPORT_ETHERNET) +
+                // TRANSPORT_USB exists from Android 12; the constant is inlined, but older
+                // releases reject transport bits they do not know.
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    intArrayOf(NetworkCapabilities.TRANSPORT_USB)
+                } else {
+                    intArrayOf()
+                },
             color = 0xFFF59E0B,
             cm = cm,
             initiallyEnabled = prefs.getBoolean("ethernet", true),
+            missingNote = "No wired adapter. Plug in a USB/OTG Ethernet adapter or a USB-C dock.",
+        ),
+        Link(
+            id = "bluetooth",
+            title = "Bluetooth",
+            hint = "PAN from a paired phone",
+            transports = intArrayOf(NetworkCapabilities.TRANSPORT_BLUETOOTH),
+            color = 0xFF38BDF8,
+            cm = cm,
+            initiallyEnabled = prefs.getBoolean("bluetooth", false),
+            missingNote = "No Bluetooth network. Pair a phone that shares its connection, then turn on internet access for it in Bluetooth settings.",
         ),
     )
 
@@ -218,7 +264,20 @@ class LinkRegistry(context: Context) {
         prefs.edit().putBoolean(id, on).apply()
     }
 
-    fun usable(): List<Link> = links.filter { it.usable }
+    /**
+     * Links that can carry traffic right now.
+     *
+     * Two links can be handed different [Network] handles that sit on the same kernel
+     * interface (a USB dock can look like both Ethernet and USB). Downloading over both
+     * would not add bandwidth, so the later link is left out and the UI says why.
+     */
+    fun usable(): List<Link> {
+        val seen = HashSet<String>()
+        return links.filter { link ->
+            val key = link.networkKey
+            link.usable && key != null && seen.add(key)
+        }
+    }
 
     fun release() = links.forEach { it.release() }
 }

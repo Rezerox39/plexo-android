@@ -134,7 +134,7 @@ like bonding while adding no bandwidth, and the UI says so instead.
 
 ## Install
 
-Grab `plexo-0.4.2-debug.apk` from the [latest release](../../releases/latest) and open it
+Grab `plexo-0.4.2-debug.apk` from the [0.4.2 pre-release](../../releases/tag/v0.4.2) and open it
 on the phone. It is debug-signed, so Android asks you to allow installing from your
 browser or file manager the first time.
 

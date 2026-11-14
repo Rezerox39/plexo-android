@@ -20,11 +20,14 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Response
 import java.io.File
 import java.io.IOException
 import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
+import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
 import java.util.Collections
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -113,6 +116,15 @@ data class DownloadSnapshot(
 }
 
 /**
+ * The server is throttling us (HTTP 429), not refusing the file. Carries the
+ * Retry-After delay so callers can wait instead of hammering it with retries.
+ */
+private class RateLimitedException(
+    val retryAfterMs: Long,
+    message: String = "Server is rate limiting (HTTP 429)",
+) : IOException(message)
+
+/**
  * Splits a file into byte ranges and downloads them at the same time over every
  * enabled link. Workers pull chunks from one shared cursor, so a faster radio simply
  * finishes more chunks - no manual bandwidth split needed.
@@ -151,6 +163,9 @@ class DownloadTask(
     /** True while every link is gone and the workers are waiting for one to return. */
     @Volatile private var waitingForLink = false
 
+    /** A transient explanation shown until the next successful transfer starts. */
+    @Volatile private var note: String? = null
+
     /** Every live network this job may use: selected by the user and under any cap. */
     private fun usableLinks(): List<Link> =
         registry.usable(allowedLinkIds).filter { isLinkAllowed(it.id) }
@@ -185,20 +200,34 @@ class DownloadTask(
         try {
             publish(snap(DownloadStatus.PREPARING))
             probe()
+            note = null
 
             if (parallel) {
                 part.parentFile?.mkdirs()
                 part.createNewFile()
                 RandomAccessFile(part, "rw").use { it.setLength(totalBytes) }
-                runParallel(part)
-                if (done.get() != totalBytes) {
-                    throw IOException("Only ${done.get()} of $totalBytes bytes arrived")
+                try {
+                    runParallel(part)
+                    if (done.get() != totalBytes) {
+                        throw IOException("Only ${done.get()} of $totalBytes bytes arrived")
+                    }
+                } catch (e: RateLimitedException) {
+                    // The probe got through, but the server refuses this many
+                    // simultaneous ranges. Wait for its window and finish the file
+                    // over one connection instead of failing the download.
+                    parallel = false
+                    val wait = e.retryAfterMs.coerceIn(MIN_RATE_LIMIT_WAIT_MS, MAX_RATE_LIMIT_WAIT_MS)
+                    note = "Server is rate limiting; retrying with one connection…"
+                    publish(snap(DownloadStatus.RUNNING))
+                    delay(wait)
+                    runSingle(part)
                 }
             } else {
                 runSingle(part)
             }
 
             currentCoroutineContext().ensureActive()
+            note = null
             publish(snap(DownloadStatus.SAVING))
             val saved = withContext(Dispatchers.IO) { Store.save(ctx, part, name, mime) }
             part.delete()
@@ -210,9 +239,27 @@ class DownloadTask(
         } catch (e: Throwable) {
             // Catch Error too: leaving the state at RUNNING would strand the UI and
             // keep the foreground service alive forever.
-            publish(snap(DownloadStatus.ERROR, message = e.message ?: e.javaClass.simpleName))
+            val message = if (e.isRateLimited()) {
+                "Server is rate limiting (HTTP 429). Wait a minute, then retry."
+            } else {
+                describe(e)
+            }
+            publish(snap(DownloadStatus.ERROR, message = message))
             runCatching { part.delete() }
         }
+    }
+
+    private fun Throwable.isRateLimited(): Boolean =
+        generateSequence(this) { it.cause }.any { it is RateLimitedException }
+
+    /** Message plus root causes, so "N ranges still failed" is not the whole story. */
+    private fun describe(e: Throwable): String {
+        val parts = generateSequence(e) { it.cause }
+            .mapNotNull { it.message?.trim()?.takeIf(String::isNotEmpty) }
+            .distinct()
+            .toList()
+        val text = if (parts.isEmpty()) e.javaClass.simpleName else parts.joinToString(" · ")
+        return text.take(400)
     }
 
     private fun partFile(): File =
@@ -220,24 +267,41 @@ class DownloadTask(
 
     /** One ranged request tells us size, range support and the real file name. */
     private suspend fun probe() = withContext(Dispatchers.IO) {
-        val candidates = usableLinks()
-        if (candidates.isEmpty()) {
-            throw IOException(noLinksMessage())
-        }
-
         // Try every live link: the first one can be a captive portal or a dead route
-        // whatever the OS thinks about it.
+        // whatever the OS thinks about it. A 429 is different: the server is asking
+        // us to slow down, so wait for its Retry-After window and try once more.
         var last: Exception? = null
-        for (link in candidates) {
-            currentCoroutineContext().ensureActive()
-            try {
-                probeOn(link)
-                return@withContext
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                last = e
+        for (attempt in 0..1) {
+            val candidates = usableLinks()
+            if (candidates.isEmpty()) {
+                last = IOException(noLinksMessage())
+                break
             }
+            var waitMs = 0L
+            for (link in candidates) {
+                currentCoroutineContext().ensureActive()
+                try {
+                    probeOn(link)
+                    return@withContext
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: RateLimitedException) {
+                    last = e
+                    waitMs = maxOf(waitMs, e.retryAfterMs)
+                } catch (e: Exception) {
+                    last = e
+                }
+            }
+            if (last !is RateLimitedException || attempt == 1) break
+
+            val pause = waitMs.coerceIn(MIN_RATE_LIMIT_WAIT_MS, MAX_RATE_LIMIT_WAIT_MS)
+            publish(
+                snap(
+                    DownloadStatus.PREPARING,
+                    message = "Server is rate limiting; waiting ${pause / 1000}s…",
+                ),
+            )
+            delay(pause)
         }
         throw last ?: IOException("Could not reach the server")
     }
@@ -255,6 +319,7 @@ class DownloadTask(
             .build()
 
         clientFor(network).newCall(request).execute().use { response ->
+            if (response.code == 429) throw rateLimited(response)
             if (response.code >= 400 && response.code != 416) {
                 throw IOException("Server answered HTTP ${response.code}")
             }
@@ -270,6 +335,30 @@ class DownloadTask(
                 parallel = false
             }
         }
+    }
+
+    /** A 429 with no usable Retry-After still deserves a short, calm pause. */
+    private fun rateLimited(response: Response): RateLimitedException =
+        RateLimitedException(retryAfterMillis(response))
+
+    /** Retry-After is either delta-seconds or an RFC 1123 date; accept both. */
+    private fun retryAfterMillis(response: Response): Long {
+        val raw = response.header("Retry-After")?.trim()
+        if (!raw.isNullOrEmpty()) {
+            raw.toLongOrNull()?.let {
+                return (it * 1000L).coerceIn(1_000L, MAX_RATE_LIMIT_WAIT_MS)
+            }
+            val at = runCatching {
+                ZonedDateTime.parse(raw, DateTimeFormatter.RFC_1123_DATE_TIME)
+                    .toInstant()
+                    .toEpochMilli()
+            }.getOrNull()
+            if (at != null) {
+                return (at - System.currentTimeMillis())
+                    .coerceIn(1_000L, MAX_RATE_LIMIT_WAIT_MS)
+            }
+        }
+        return DEFAULT_RATE_LIMIT_WAIT_MS
     }
 
     private suspend fun runParallel(part: File) = coroutineScope {
@@ -426,6 +515,10 @@ class DownloadTask(
                 chunk(channel, range, link, buffer)
             } catch (e: CancellationException) {
                 throw e
+            } catch (e: RateLimitedException) {
+                // A server-wide throttle, not this range's fault. Stop the parallel
+                // pass and let run() retry the file over one connection.
+                throw e
             } catch (e: Exception) {
                 failed.add(range)
                 firstError.compareAndSet(null, e)
@@ -459,6 +552,10 @@ class DownloadTask(
                 return
             } catch (e: CancellationException) {
                 throw e
+            } catch (e: RateLimitedException) {
+                // Do not burn six attempts against a 429 and do not mark the link
+                // dead: the server is fine, it just wants fewer requests.
+                throw e
             } catch (e: Exception) {
                 val count = failures.getOrPut(link.id) { AtomicInteger() }.incrementAndGet()
                 if (count >= 3) deadLinks.add(link.id)
@@ -488,6 +585,7 @@ class DownloadTask(
 
         try {
             clientFor(link).newCall(request).execute().use { response ->
+                if (response.code == 429) throw rateLimited(response)
                 if (response.code != 206) throw IOException("Server answered ${response.code}")
                 checkRange(response.header("Content-Range"), range.start, range.end)
                 val body = response.body ?: throw IOException("Empty response body")
@@ -579,6 +677,7 @@ class DownloadTask(
                 val request = Request.Builder().url(url).build()
 
                 clientFor(link).newCall(request).execute().use { response ->
+                    if (response.code == 429) throw rateLimited(response)
                     if (!response.isSuccessful) throw IOException("Server answered ${response.code}")
                     totalBytes = response.body?.contentLength() ?: -1L
                     val body = response.body ?: throw IOException("Empty response body")
@@ -599,6 +698,14 @@ class DownloadTask(
                 return
             } catch (e: CancellationException) {
                 throw e
+            } catch (e: RateLimitedException) {
+                attempt++
+                if (attempt >= 4) throw e
+                val wait = e.retryAfterMs.coerceIn(MIN_RATE_LIMIT_WAIT_MS, MAX_RATE_LIMIT_WAIT_MS)
+                note = "Server is rate limiting; waiting ${wait / 1000}s…"
+                publish(snap(DownloadStatus.RUNNING))
+                delay(wait)
+                note = null
             } catch (e: Exception) {
                 attempt++
                 if (attempt >= 4) throw IOException("Download failed: ${e.message}", e)
@@ -712,7 +819,7 @@ class DownloadTask(
             speedBps = speed,
             links = links,
             parallel = parallel,
-            message = message ?: when {
+            message = message ?: note ?: when {
                 waitingForLink && registry.usable(allowedLinkIds).isEmpty() -> "Waiting for a network…"
                 waitingForLink -> "Plexo's data limit is reached on every selected link"
                 else -> null
@@ -767,6 +874,10 @@ class DownloadTask(
         const val WAIT_FOR_LINK_MS = 30_000L
         /** How long streams for a selected but not-yet-connected link wait to join. */
         const val LATE_LINK_WAIT_MS = 120_000L
+        /** Shortest/longest automatic pause after a 429, before retrying. */
+        const val MIN_RATE_LIMIT_WAIT_MS = 1_000L
+        const val DEFAULT_RATE_LIMIT_WAIT_MS = 3_000L
+        const val MAX_RATE_LIMIT_WAIT_MS = 30_000L
     }
 }
 

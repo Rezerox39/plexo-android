@@ -435,10 +435,26 @@ fun clientFor(network: Network): OkHttpClient = OkHttpClient.Builder()
     )
     .addInterceptor { chain ->
         // identity encoding is important: a gzipped range no longer matches the file
-        // offsets we write to. A User-Agent also keeps picky CDNs from refusing us.
+        // offsets we write to. A browser-like header set also keeps CDNs and bot
+        // filters from answering a plain download client with 403/429; the Referer
+        // is the file's own origin, which is what a browser would send.
+        val request = chain.request()
+        val origin = request.url.newBuilder()
+            .encodedPath("/")
+            .query(null)
+            .fragment(null)
+            .build()
+            .toString()
         chain.proceed(
-            chain.request().newBuilder()
-                .header("User-Agent", "Plexo/0.3 (+https://github.com/Rezerox39/plexo-android)")
+            request.newBuilder()
+                .header(
+                    "User-Agent",
+                    "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 " +
+                        "(KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36",
+                )
+                .header("Accept", "*/*")
+                .header("Accept-Language", "en-US,en;q=0.9")
+                .header("Referer", origin)
                 .header("Accept-Encoding", "identity")
                 .build(),
         )

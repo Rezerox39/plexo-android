@@ -393,7 +393,7 @@ fun SettingsScreen(
         PanelCard {
             SectionLabel("About")
             Spacer(Modifier.height(8.dp))
-            Text("Plexo for Android 0.4.0", style = MaterialTheme.typography.titleMedium, color = TextPrimary)
+            Text("Plexo for Android 0.4.1", style = MaterialTheme.typography.titleMedium, color = TextPrimary)
             Text(
                 "A direct port of the desktop Plexo download engine. No account, no server, no VPN: the app asks Android for each radio separately and binds its own sockets to them.",
                 style = MaterialTheme.typography.bodySmall,

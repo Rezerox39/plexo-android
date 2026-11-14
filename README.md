@@ -133,7 +133,7 @@ like bonding while adding no bandwidth, and the UI says so instead.
 
 ## Install
 
-Grab `plexo-0.4.0-debug.apk` from the [latest release](../../releases/latest) and open it
+Grab `plexo-0.4.1-debug.apk` from the [latest release](../../releases/latest) and open it
 on the phone. It is debug-signed, so Android asks you to allow installing from your
 browser or file manager the first time.
 
@@ -220,6 +220,14 @@ ranges get up to three extra passes after the main pass; the whole job only fail
 when every link is unusable. Subtly, this means unplugging the Ethernet adapter
 mid-download costs you nothing — its remaining ranges are simply picked up by
 Wi-Fi, and a partly written range is re-fetched and counted once.
+
+HTTP 429 is treated as backpressure, not a dead file. The probe honours
+`Retry-After`, waits and tries once more. If the server accepts the file but
+throttles the parallel ranges, Plexo stops the range pass and finishes the file
+over a single connection after the cooldown, rather than failing within seconds.
+A 429 is never counted as a dead link or retried six times in a burst. The request
+headers are browser-shaped (referer and accept headers, no custom bot-looking
+agent) because file hosts commonly put non-browser clients behind a 403/429 wall.
 
 ## Not in this build
 

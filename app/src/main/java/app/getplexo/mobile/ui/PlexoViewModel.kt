@@ -43,8 +43,16 @@ class PlexoViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun cancel(id: String) = repo.cancel(id)
-    fun retry(id: String) = repo.retry(id)
-    fun again(id: String) = repo.again(id)
+    fun retry(id: String) {
+        repo.retry(id)
+        DownloadService.ensureRunning(getApplication())
+    }
+
+    fun again(id: String) {
+        repo.again(id)
+        DownloadService.ensureRunning(getApplication())
+    }
+
     fun remove(id: String) = repo.remove(id)
     fun clearFinished() = repo.clearFinished()
     fun cancelAll() = repo.cancelAll()

@@ -10,7 +10,7 @@ limit; **Impossible** = the Android platform forbids it; **Missing** = not built
 
 ## Screens and actions
 
-| Desktop feature | Android 0.4.0 |
+| Desktop feature | Android 0.4.1 |
 | --- | --- |
 | Downloads screen with All / Downloading / Queued / Needs attention / Finished filters and counts | Done |
 | Row actions: pause, resume, retry, fix link, download again, open, reveal, copy link, cancel, remove, trash | Partial — cancel, retry, remove from list, copy link, open file and details are present. Pause/resume, reveal folder, fix-link dialog and delete-file are missing |
@@ -52,3 +52,5 @@ limit; **Impossible** = the Android platform forbids it; **Missing** = not built
   connection; per-network DNS and socket binding; per-network cookie jar.
 - A dropped link is waited for (30 s when *Keep waiting for a link* is on), so a
   mobile handover does not fail the file.
+- HTTP 429/`Retry-After` is throttling, not a failed link: pause, retry the probe,
+  then fall back to one connection if parallel ranges are being refused.

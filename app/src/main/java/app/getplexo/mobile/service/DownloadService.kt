@@ -36,14 +36,11 @@ class DownloadService : Service() {
         super.onCreate()
         repo = (application as PlexoApp).downloads
         createChannel()
-        // A foreground service alone does not keep the CPU awake; with the screen off
-        // a download can be suspended mid-range. Six hours is a safety valve.
+        // Keep the CPU awake only while bytes are actually moving; a queued item or a
+        // finished list must not hold the phone awake for hours.
         wakeLock = getSystemService(PowerManager::class.java)
             ?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "plexo:download")
-            ?.apply {
-                setReferenceCounted(false)
-                acquire(6 * 60 * 60 * 1000L)
-            }
+            ?.apply { setReferenceCounted(false) }
         startForeground(
             NOTIFICATION_ID,
             buildNotification(emptyList()),
@@ -53,6 +50,7 @@ class DownloadService : Service() {
         scope.launch {
             repo.entries.collect { entries ->
                 if (entries.any { !it.isFinished }) sawWork = true
+                updateWakeLock(entries)
                 if (sawWork && entries.none { !it.isFinished }) {
                     getSystemService(NotificationManager::class.java).cancel(NOTIFICATION_ID)
                     stopForeground(STOP_FOREGROUND_REMOVE)
@@ -88,18 +86,36 @@ class DownloadService : Service() {
                     stopSelf()
                 }
             }
+
+            // Retry/again happen from the UI after an error stopped the service.
+            // Bring the foreground service (and its wake lock) back before the
+            // repository resumes the transfer.
+            ACTION_ENSURE -> sawWork = true
         }
         return START_NOT_STICKY
     }
 
     override fun onDestroy() {
-        wakeLock?.let { if (it.isHeld) it.release() }
+        releaseWakeLock()
         wakeLock = null
         scope.cancel()
         super.onDestroy()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    private fun updateWakeLock(entries: List<DownloadEntry>) {
+        val lock = wakeLock ?: return
+        if (entries.any { it.isActive }) {
+            if (!lock.isHeld) lock.acquire(WAKE_LOCK_TIMEOUT_MS)
+        } else {
+            releaseWakeLock()
+        }
+    }
+
+    private fun releaseWakeLock() {
+        wakeLock?.let { if (it.isHeld) it.release() }
+    }
 
     private fun notify(entries: List<DownloadEntry>) {
         val manager = getSystemService(NotificationManager::class.java)
@@ -188,12 +204,14 @@ class DownloadService : Service() {
     companion object {
         const val ACTION_START = "app.getplexo.mobile.action.START"
         const val ACTION_CANCEL = "app.getplexo.mobile.action.CANCEL"
+        private const val ACTION_ENSURE = "app.getplexo.mobile.action.ENSURE"
         private const val EXTRA_URL = "url"
         private const val EXTRA_NAME = "name"
         private const val EXTRA_NETWORKS = "networks"
         private const val EXTRA_STREAMS = "streams"
         private const val CHANNEL_ID = "downloads"
         private const val NOTIFICATION_ID = 41
+        private const val WAKE_LOCK_TIMEOUT_MS = 6 * 60 * 60 * 1000L
 
         fun startIntent(
             context: Context,
@@ -226,6 +244,14 @@ class DownloadService : Service() {
             ContextCompat.startForegroundService(
                 context,
                 Intent(context, DownloadService::class.java).setAction(ACTION_CANCEL),
+            )
+        }
+
+        /** Re-arm the foreground service without creating another download. */
+        fun ensureRunning(context: Context) {
+            ContextCompat.startForegroundService(
+                context,
+                Intent(context, DownloadService::class.java).setAction(ACTION_ENSURE),
             )
         }
     }

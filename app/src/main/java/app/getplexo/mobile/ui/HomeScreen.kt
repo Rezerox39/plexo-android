@@ -71,7 +71,7 @@ import app.getplexo.mobile.core.LinkState
 import app.getplexo.mobile.core.SpeedUnit
 import java.util.Locale
 
-private const val VERSION = "0.4.0"
+private const val VERSION = "0.4.1"
 
 private enum class DownloadFilter(val label: String) {
     ALL("All"),
@@ -934,6 +934,10 @@ private fun DownloadDetailSheet(
                 snapshot.message?.takeIf { it.isNotBlank() }?.let {
                     Spacer(Modifier.height(8.dp))
                     Text(it, style = MaterialTheme.typography.bodySmall, color = if (snapshot.status == DownloadStatus.ERROR) Coral else TextMuted)
+                    if (snapshot.status == DownloadStatus.ERROR) {
+                        Spacer(Modifier.height(4.dp))
+                        SmallAction("Copy error", { copyError(context, entry) }, TextMuted)
+                    }
                 }
             }
 
@@ -1159,7 +1163,7 @@ private fun statusLine(entry: DownloadEntry): String {
             if (s.parallel) {
                 "${s.links.size} links · $streams streams · ${formatEta(s.etaSeconds ?: 0)} left"
             } else {
-                "Single connection · the server does not allow ranges"
+                "Single connection · ranges are unavailable or throttled"
             }
         }
 
@@ -1173,6 +1177,16 @@ private fun statusLine(entry: DownloadEntry): String {
 private fun copyLink(context: Context, entry: DownloadEntry) {
     val manager = context.getSystemService(ClipboardManager::class.java)
     manager.setPrimaryClip(ClipData.newPlainText("Plexo link", entry.snapshot.url))
+}
+
+private fun copyError(context: Context, entry: DownloadEntry) {
+    val manager = context.getSystemService(ClipboardManager::class.java)
+    val text = buildString {
+        append(entry.snapshot.message ?: "Download failed")
+        append('\n')
+        append(entry.snapshot.url)
+    }
+    manager.setPrimaryClip(ClipData.newPlainText("Plexo error", text))
 }
 
 private fun openSaved(context: Context, entry: DownloadEntry) {

@@ -71,7 +71,7 @@ import app.getplexo.mobile.core.LinkState
 import app.getplexo.mobile.core.SpeedUnit
 import java.util.Locale
 
-private const val VERSION = "0.4.1"
+private const val VERSION = "0.4.2"
 
 private enum class DownloadFilter(val label: String) {
     ALL("All"),

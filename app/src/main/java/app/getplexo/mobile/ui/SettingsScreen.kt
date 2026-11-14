@@ -183,15 +183,15 @@ fun SettingsScreen(
                 title = "Maximum range size",
                 value = "$chunk MB",
                 valueFloat = chunk.toFloat(),
-                range = 1f..32f,
-                steps = 30,
+                range = 16f..256f,
+                steps = 14,
                 onChange = {
                     chunk = it.roundToInt()
                     settings.chunkMb = chunk
                 },
             )
             Text(
-                "Plexo sizes every request from the link's measured speed, never above this cap. Slow links get small ranges so they cannot hold the tail.",
+                "Each stream downloads one equal range of the file. Large ranges mean fewer requests and less throttling; lower this only if a flaky link keeps restarting a big range.",
                 style = MaterialTheme.typography.bodySmall,
                 color = TextFaint,
             )
@@ -393,7 +393,7 @@ fun SettingsScreen(
         PanelCard {
             SectionLabel("About")
             Spacer(Modifier.height(8.dp))
-            Text("Plexo for Android 0.4.1", style = MaterialTheme.typography.titleMedium, color = TextPrimary)
+            Text("Plexo for Android 0.4.2", style = MaterialTheme.typography.titleMedium, color = TextPrimary)
             Text(
                 "A direct port of the desktop Plexo download engine. No account, no server, no VPN: the app asks Android for each radio separately and binds its own sockets to them.",
                 style = MaterialTheme.typography.bodySmall,

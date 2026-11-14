@@ -10,7 +10,7 @@ limit; **Impossible** = the Android platform forbids it; **Missing** = not built
 
 ## Screens and actions
 
-| Desktop feature | Android 0.4.1 |
+| Desktop feature | Android 0.4.2 |
 | --- | --- |
 | Downloads screen with All / Downloading / Queued / Needs attention / Finished filters and counts | Done |
 | Row actions: pause, resume, retry, fix link, download again, open, reveal, copy link, cancel, remove, trash | Partial — cancel, retry, remove from list, copy link, open file and details are present. Pause/resume, reveal folder, fix-link dialog and delete-file are missing |
@@ -46,11 +46,13 @@ limit; **Impossible** = the Android platform forbids it; **Missing** = not built
   clamped to `totalBytes - 1`.
 - Three retry rounds for leftover ranges, six attempts per range, and a link is
   dropped from rotation after three consecutive failures.
-- Two-second rolling speed window; per-link measured speed determines request
-  size; 256 KB floor; configured chunk size is the ceiling.
+- Two-second rolling speed window. The parallel pass uses one equal range per
+  stream (Via's model); 256 KB floor and a 256 MB default ceiling keep request
+  counts low without making a failed range expensive to restart.
 - HTTP/1.1 per stream so OkHttp cannot multiplex all ranges over one TCP
   connection; per-network DNS and socket binding; per-network cookie jar.
 - A dropped link is waited for (30 s when *Keep waiting for a link* is on), so a
   mobile handover does not fail the file.
-- HTTP 429/`Retry-After` is throttling, not a failed link: pause, retry the probe,
-  then fall back to one connection if parallel ranges are being refused.
+- HTTP 429/`Retry-After` is throttling, not a failed link: the probe pauses and
+  retries; the parallel pass pauses every stream on a shared gate, retries the same
+  range, and only falls back to one connection after repeated refusals.

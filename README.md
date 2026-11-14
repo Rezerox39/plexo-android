@@ -93,14 +93,15 @@ like bonding while adding no bandwidth, and the UI says so instead.
   mobile data on themselves, so a switch only declares "Plexo may use this link":
   when the radio is off the panel says so immediately and offers a button that
   opens the right system panel.
-- **Adaptive parallel downloader** — probes the server, honours `Accept-Ranges`,
-  works out the file name from `Content-Disposition`, and lets all links pull ranges
-  from one shared byte cursor. Each request is sized from that link's own measured
-  speed (about four seconds of work, 256 KB floor): a fast radio gets large ranges,
-  a Bluetooth link gets small ones, so a slow link can never grab a big chunk and
-  then hold the tail of the file while everything else has finished. Speeds are
+- **Parallel range downloader** — probes the server, honours `Accept-Ranges`,
+  works out the file name from `Content-Disposition`, and lets all links pull from
+  one shared byte cursor. Like Via's downloader, the file is split into one large
+  equal range per stream (up to 256 MB by default) instead of hundreds of tiny
+  requests, which is what keeps Google Drive and similar hosts from throttling the
+  job. A 429 pauses every stream for the server's `Retry-After` window and retries
+  the same range; only repeated refusals fall back to one connection. Speeds are
   averaged over a rolling two-second window, so the readout does not flicker with
-  the modem's burst/sleep cycle. Connections are pooled per link, so chunks reuse
+  the modem's burst/sleep cycle. Connections are pooled per link, so retries reuse
   warm TCP/TLS sessions instead of paying a handshake each time.
 - **Queue and history** — desktop's *downloads at once* setting (1–4) is honoured;
   extra files wait in the queue. Every finished or failed transfer stays in a
@@ -133,7 +134,7 @@ like bonding while adding no bandwidth, and the UI says so instead.
 
 ## Install
 
-Grab `plexo-0.4.1-debug.apk` from the [latest release](../../releases/latest) and open it
+Grab `plexo-0.4.2-debug.apk` from the [latest release](../../releases/latest) and open it
 on the phone. It is debug-signed, so Android asks you to allow installing from your
 browser or file manager the first time.
 
@@ -189,13 +190,16 @@ ConnectivityManager.requestNetwork(ETHERNET | USB)       -> Network D  (eth0)
 
 probe:  GET Range: bytes=0-0        -> size, Accept-Ranges, filename
 
-ranges: shared AtomicLong byte cursor; each request sized per link
-        fast link  -> up to 8 MB   (few round trips)
-        slow link  -> 256 KB       (cannot hold the tail)
+ranges: shared AtomicLong byte cursor; one equal range per stream
+        ~1 GB file, 8 streams -> 8 requests of ~128 MB
+        256 MB range cap keeps retries bounded on very large files
 
         worker(link A) x4  worker(link B) x4  worker(link C) x4
         each: GET Range: bytes=<start>-<end>  via client pinned to its Network
               FileChannel.write(buffer, position)   // thread-safe positional write
+
+        429: wait for Retry-After, retry the same range, keep every stream
+             paused until the shared gate opens
 
 done:   verify length, copy into MediaStore Downloads/Plexo
 ```
@@ -205,7 +209,7 @@ Key files:
 | Path | Role |
 | --- | --- |
 | `core/Links.kt` | Network requests, link state, `BoundSocketFactory`, per-network DNS and OkHttp clients |
-| `core/Downloads.kt` | Probe, adaptive range planner, work-stealing workers, retries, progress maths, queue/history repository |
+| `core/Downloads.kt` | Probe, large equal-range planner, work-stealing workers, 429 gate, retries, progress maths, queue/history repository |
 | `core/RateLimiter.kt` | Shared total and per-link byte pacing across every stream and file |
 | `core/Settings.kt` | Themes, speed units, queue depth, schedule, caps and per-link preferences |
 | `core/Store.kt` | MediaStore hand-off |
@@ -222,10 +226,10 @@ mid-download costs you nothing — its remaining ranges are simply picked up by
 Wi-Fi, and a partly written range is re-fetched and counted once.
 
 HTTP 429 is treated as backpressure, not a dead file. The probe honours
-`Retry-After`, waits and tries once more. If the server accepts the file but
-throttles the parallel ranges, Plexo stops the range pass and finishes the file
-over a single connection after the cooldown, rather than failing within seconds.
-A 429 is never counted as a dead link or retried six times in a burst. The request
+`Retry-After`, waits and tries once more. During the parallel pass, a 429 opens a
+shared gate: every stream pauses for the same `Retry-After` window, then the same
+range is retried. Only repeated refusals (four per range) fall back to one
+connection after the cooldown. A 429 is never counted as a dead link. The request
 headers are browser-shaped (referer and accept headers, no custom bot-looking
 agent) because file hosts commonly put non-browser clients behind a 403/429 wall.
 

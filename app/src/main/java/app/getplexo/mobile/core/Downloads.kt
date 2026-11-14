@@ -2,6 +2,7 @@ package app.getplexo.mobile.core
 
 import android.content.Context
 import android.net.Uri
+import android.os.SystemClock
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -125,9 +126,9 @@ private class RateLimitedException(
 ) : IOException(message)
 
 /**
- * Splits a file into byte ranges and downloads them at the same time over every
- * enabled link. Workers pull chunks from one shared cursor, so a faster radio simply
- * finishes more chunks - no manual bandwidth split needed.
+ * Splits a file into large equal byte ranges and downloads them at the same time
+ * over every enabled link. Each stream gets one range, like Via's downloader, so
+ * a 1 GB file is a handful of requests instead of hundreds of small ones.
  */
 class DownloadTask(
     private val ctx: Context,
@@ -157,6 +158,16 @@ class DownloadTask(
     @Volatile private var parallel = false
     @Volatile private var name = "download"
     @Volatile private var mime: String? = null
+
+    /**
+     * One equal range per stream for the parallel pass, like Via's downloader.
+     * Hundreds of small range requests make file hosts throttle the whole job;
+     * a handful of large ranges keeps every connection busy with one request.
+     */
+    @Volatile private var parallelChunkBytes = 0L
+
+    /** Earliest [SystemClock.elapsedRealtime] at which another range may start. */
+    private val rateGateUntil = AtomicLong(0L)
 
     private var speed = 0L
 
@@ -361,6 +372,25 @@ class DownloadTask(
         return DEFAULT_RATE_LIMIT_WAIT_MS
     }
 
+    /**
+     * A shared gate: when one range sees 429, every stream waits for the same
+     * Retry-After window instead of independently hammering the host.
+     */
+    private suspend fun awaitRateGate() {
+        while (true) {
+            val remaining = rateGateUntil.get() - SystemClock.elapsedRealtime()
+            if (remaining <= 0L) return
+            delay(minOf(remaining, 1_000L))
+        }
+    }
+
+    private fun openRateGate(retryAfterMs: Long): Long {
+        val wait = retryAfterMs.coerceIn(MIN_RATE_LIMIT_WAIT_MS, MAX_RATE_LIMIT_WAIT_MS)
+        val until = SystemClock.elapsedRealtime() + wait
+        rateGateUntil.updateAndGet { maxOf(it, until) }
+        return wait
+    }
+
     private suspend fun runParallel(part: File) = coroutineScope {
         val cursor = AtomicLong(0L)
         val channel = RandomAccessFile(part, "rw").channel
@@ -386,6 +416,9 @@ class DownloadTask(
             // cursor as soon as it is usable. Those waiters are cancelled when the file
             // is done so they cannot keep the job alive.
             val pool = streamLinks()
+            val connectedStreams = pool.filter { it.usable }
+                .sumOf { streamsFor(it.id).coerceAtLeast(1) }
+            parallelChunkBytes = equalChunkBytes(totalBytes, connectedStreams)
             val lateStop = AtomicBoolean(false)
             val lateJobs = pool.filterNot { it.usable }.flatMap { link ->
                 List(streamsFor(link.id).coerceAtLeast(1)) {
@@ -452,9 +485,8 @@ class DownloadTask(
     }
 
     /**
-     * Hands out the next byte range. The size is per link and adaptive: a fast radio
-     * gets large requests (fewer round trips), a slow one gets small ones so it cannot
-     * sit on the tail of the file while every other link has finished.
+     * Hands out the next byte range. The parallel pass uses large equal ranges,
+     * one per stream, so a 1 GB file is eight requests instead of hundreds.
      */
     private fun nextRange(cursor: AtomicLong, link: Link): ByteRange? {
         val size = chunkBytesFor(link)
@@ -463,7 +495,20 @@ class DownloadTask(
         return ByteRange(start, minOf(totalBytes - 1, start + size - 1))
     }
 
+    /**
+     * Via splits the file into one equal slice per connection. That keeps the
+     * request count low, which is what stops Google Drive and similar hosts from
+     * answering 429 after a burst of tiny ranges.
+     */
+    private fun equalChunkBytes(total: Long, streams: Int): Long {
+        if (total <= 0L || streams <= 0) return PROBE_CHUNK_BYTES
+        val per = (total + streams - 1) / streams
+        val cap = chunkSize.coerceIn(MIN_CHUNK_BYTES, MAX_CHUNK_BYTES)
+        return per.coerceAtMost(cap).coerceAtLeast(MIN_CHUNK_BYTES)
+    }
+
     private fun chunkBytesFor(link: Link): Long {
+        if (parallelChunkBytes > 0L) return parallelChunkBytes
         val maxChunk = chunkSize.coerceIn(MIN_CHUNK_BYTES, MAX_CHUNK_BYTES)
         val measured = perLinkSpeed[link.id] ?: 0L
         // Nothing measured yet: start small. A Bluetooth link that grabbed the configured
@@ -542,6 +587,7 @@ class DownloadTask(
         buffer: ByteArray,
     ) {
         var attempt = 0
+        var rateAttempts = 0
 
         while (true) {
             currentCoroutineContext().ensureActive()
@@ -549,13 +595,19 @@ class DownloadTask(
             try {
                 fetch(link, range, channel, buffer)
                 failures[link.id]?.set(0)
+                note = null
                 return
             } catch (e: CancellationException) {
                 throw e
             } catch (e: RateLimitedException) {
-                // Do not burn six attempts against a 429 and do not mark the link
-                // dead: the server is fine, it just wants fewer requests.
-                throw e
+                // A 429 is backpressure, not a dead link. Pause every stream until
+                // Retry-After expires and retry this same range. Only give up on the
+                // parallel pass after the host keeps refusing despite the pauses.
+                if (rateAttempts >= MAX_RATE_LIMIT_RETRIES) throw e
+                rateAttempts++
+                val wait = openRateGate(e.retryAfterMs)
+                note = "Server is rate limiting; waiting ${wait / 1000}s…"
+                delay(wait)
             } catch (e: Exception) {
                 val count = failures.getOrPut(link.id) { AtomicInteger() }.incrementAndGet()
                 if (count >= 3) deadLinks.add(link.id)
@@ -574,6 +626,8 @@ class DownloadTask(
         channel: FileChannel,
         buffer: ByteArray,
     ) {
+        awaitRateGate()
+
         val request = Request.Builder()
             .url(url)
             .header("Range", "bytes=${range.start}-${range.end}")
@@ -674,6 +728,7 @@ class DownloadTask(
                 history.clear()
                 historyByLink.clear()
                 perLinkSpeed.clear()
+                awaitRateGate()
                 val request = Request.Builder().url(url).build()
 
                 clientFor(link).newCall(request).execute().use { response ->
@@ -701,7 +756,7 @@ class DownloadTask(
             } catch (e: RateLimitedException) {
                 attempt++
                 if (attempt >= 4) throw e
-                val wait = e.retryAfterMs.coerceIn(MIN_RATE_LIMIT_WAIT_MS, MAX_RATE_LIMIT_WAIT_MS)
+                val wait = openRateGate(e.retryAfterMs)
                 note = "Server is rate limiting; waiting ${wait / 1000}s…"
                 publish(snap(DownloadStatus.RUNNING))
                 delay(wait)
@@ -861,7 +916,7 @@ class DownloadTask(
         const val ABORT_AFTER_FAILURES = 6
         /** Floor for one request: small enough that a 0.2 Mbps link cannot hold the tail. */
         const val MIN_CHUNK_BYTES = 256L * 1024
-        const val MAX_CHUNK_BYTES = 128L * 1024 * 1024
+        const val MAX_CHUNK_BYTES = 256L * 1024 * 1024
         /** Aim for about four seconds of transfer per request. */
         const val CHUNK_SECONDS = 4L
         /** Fraction of the configured maximum used before a link has a measured speed. */
@@ -878,6 +933,8 @@ class DownloadTask(
         const val MIN_RATE_LIMIT_WAIT_MS = 1_000L
         const val DEFAULT_RATE_LIMIT_WAIT_MS = 3_000L
         const val MAX_RATE_LIMIT_WAIT_MS = 30_000L
+        /** Same-range 429 retries before the parallel pass falls back to one link. */
+        const val MAX_RATE_LIMIT_RETRIES = 4
     }
 }
 

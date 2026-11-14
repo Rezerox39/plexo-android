@@ -75,6 +75,17 @@ class Settings(context: Context) {
     private val prefs = context.applicationContext
         .getSharedPreferences("plexo_settings", Context.MODE_PRIVATE)
 
+    init {
+        // 0.4.1 and older tuned small adaptive ranges. 0.4.2 switches to one large
+        // equal range per stream (Via's model), so an old 8 MB ceiling would put
+        // the request count right back where it caused throttling.
+        if (!prefs.contains("chunk_mb_v2")) {
+            val old = prefs.getInt("chunk_mb", 8)
+            val migrated = if (old <= 8) 256 else old.coerceIn(16, 256)
+            prefs.edit().putInt("chunk_mb_v2", migrated).apply()
+        }
+    }
+
     // --- engine -------------------------------------------------------------
 
     /** Concurrent connections per link. More streams help on high-latency links. */
@@ -82,10 +93,13 @@ class Settings(context: Context) {
         get() = prefs.getInt("streams", 8).coerceIn(1, 32)
         set(value) = prefs.edit().putInt("streams", value.coerceIn(1, 32)).apply()
 
-    /** Upper bound for each byte range. The engine sizes ranges per link below this. */
+    /**
+     * Upper bound for one byte range. The parallel pass splits the file into one
+     * equal range per stream, capped here; smaller values mean more requests.
+     */
     var chunkMb: Int
-        get() = prefs.getInt("chunk_mb", 8).coerceIn(1, 64)
-        set(value) = prefs.edit().putInt("chunk_mb", value.coerceIn(1, 64)).apply()
+        get() = prefs.getInt("chunk_mb_v2", 256).coerceIn(16, 256)
+        set(value) = prefs.edit().putInt("chunk_mb_v2", value.coerceIn(16, 256)).apply()
 
     /** Total download cap in MB/s. 0 means unlimited. */
     var speedLimitMbps: Int

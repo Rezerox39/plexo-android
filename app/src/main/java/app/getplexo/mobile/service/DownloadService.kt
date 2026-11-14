@@ -15,9 +15,8 @@ import androidx.core.content.ContextCompat
 import app.getplexo.mobile.MainActivity
 import app.getplexo.mobile.PlexoApp
 import app.getplexo.mobile.R
+import app.getplexo.mobile.core.DownloadEntry
 import app.getplexo.mobile.core.DownloadRepository
-import app.getplexo.mobile.core.DownloadSnapshot
-import app.getplexo.mobile.core.DownloadStatus
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -38,7 +37,7 @@ class DownloadService : Service() {
         repo = (application as PlexoApp).downloads
         createChannel()
         // A foreground service alone does not keep the CPU awake; with the screen off
-        // the download can be suspended mid-range. Six hours is a safety valve.
+        // a download can be suspended mid-range. Six hours is a safety valve.
         wakeLock = getSystemService(PowerManager::class.java)
             ?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "plexo:download")
             ?.apply {
@@ -47,20 +46,19 @@ class DownloadService : Service() {
             }
         startForeground(
             NOTIFICATION_ID,
-            buildNotification(DownloadSnapshot.idle(), "Preparing download"),
+            buildNotification(emptyList()),
             ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
         )
 
         scope.launch {
-            repo.state.collect { snapshot ->
-                if (snapshot == null) return@collect
-                if (!snapshot.status.finished) sawWork = true
-                notify(snapshot)
-                // Only tear the service down for a download this service actually ran,
-                // never for a result left over from a previous session.
-                if (sawWork && snapshot.status.finished) {
-                    stopForeground(STOP_FOREGROUND_DETACH)
+            repo.entries.collect { entries ->
+                if (entries.any { !it.isFinished }) sawWork = true
+                if (sawWork && entries.none { !it.isFinished }) {
+                    getSystemService(NotificationManager::class.java).cancel(NOTIFICATION_ID)
+                    stopForeground(STOP_FOREGROUND_REMOVE)
                     stopSelf()
+                } else {
+                    notify(entries)
                 }
             }
         }
@@ -70,20 +68,25 @@ class DownloadService : Service() {
         when (intent?.action) {
             ACTION_START -> {
                 val url = intent.getStringExtra(EXTRA_URL)
-                if (!url.isNullOrBlank() && !repo.busy) {
+                if (!url.isNullOrBlank()) {
                     sawWork = true
+                    val networks = intent.getStringArrayListExtra(EXTRA_NETWORKS)?.toSet()
+                    val streams = intent.getIntExtra(EXTRA_STREAMS, 0).takeIf { it > 0 }
                     repo.start(
                         url = url,
                         name = intent.getStringExtra(EXTRA_NAME),
-                        streams = intent.getIntExtra(EXTRA_STREAMS, 4),
-                        chunkSize = intent.getLongExtra(EXTRA_CHUNK, 8L * 1024 * 1024),
+                        networkIds = networks,
+                        streams = streams,
                     )
                 }
             }
 
             ACTION_CANCEL -> {
-                repo.cancel()
-                if (!repo.busy) stopSelf()
+                repo.cancelAll()
+                if (!repo.busy) {
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                    stopSelf()
+                }
             }
         }
         return START_NOT_STICKY
@@ -92,30 +95,42 @@ class DownloadService : Service() {
     override fun onDestroy() {
         wakeLock?.let { if (it.isHeld) it.release() }
         wakeLock = null
-        repo.cancel()
         scope.cancel()
         super.onDestroy()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    private fun notify(snapshot: DownloadSnapshot) {
+    private fun notify(entries: List<DownloadEntry>) {
         val manager = getSystemService(NotificationManager::class.java)
-        runCatching {
-            manager.notify(NOTIFICATION_ID, buildNotification(snapshot, title(snapshot)))
+        runCatching { manager.notify(NOTIFICATION_ID, buildNotification(entries)) }
+    }
+
+    private fun buildNotification(entries: List<DownloadEntry>): Notification {
+        val active = entries.filter { it.isActive || it.isQueued }
+        val running = entries.filter { it.isActive }
+        val speed = running.sumOf { it.snapshot.speedBps }
+        val first = running.firstOrNull()
+
+        val title = when {
+            active.isEmpty() -> "Plexo"
+            active.size == 1 -> active.first().snapshot.name.ifBlank { "Downloading" }
+            else -> "Downloading ${active.size} files"
         }
-    }
 
-    private fun title(snapshot: DownloadSnapshot): String = when (snapshot.status) {
-        DownloadStatus.PREPARING -> "Preparing download"
-        DownloadStatus.RUNNING -> snapshot.name.ifBlank { "Downloading" }
-        DownloadStatus.SAVING -> "Saving ${snapshot.name}"
-        DownloadStatus.DONE -> "${snapshot.name} saved"
-        DownloadStatus.ERROR -> "Download failed"
-        DownloadStatus.CANCELLED -> "Download cancelled"
-    }
+        val text = when {
+            active.isEmpty() -> "Nothing in the queue"
+            speed > 0 -> buildString {
+                append(formatRate(speed))
+                append(" · ")
+                append("${running.size} active")
+                if (active.size > running.size) append(", ${active.size - running.size} queued")
+            }
 
-    private fun buildNotification(snapshot: DownloadSnapshot, title: String): Notification {
+            first != null -> "Preparing ${first.snapshot.name}"
+            else -> "Waiting for schedule"
+        }
+
         val open = PendingIntent.getActivity(
             this,
             0,
@@ -132,35 +147,25 @@ class DownloadService : Service() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
 
-        val text = when (snapshot.status) {
-            DownloadStatus.DONE -> snapshot.savedTo ?: "Saved to Downloads"
-            DownloadStatus.ERROR -> snapshot.message ?: "Something went wrong"
-            DownloadStatus.CANCELLED -> "Cancelled"
-            DownloadStatus.SAVING -> "Writing to Downloads/Plexo"
-            else -> buildString {
-                append(formatBytes(snapshot.bytesDone))
-                if (snapshot.totalBytes > 0) append(" of ").append(formatBytes(snapshot.totalBytes))
-                if (snapshot.speedBps > 0) append(" · ").append(formatRate(snapshot.speedBps))
-            }
-        }
-
         val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_sys_download)
             .setContentTitle(title)
             .setContentText(text)
             .setContentIntent(open)
             .setOnlyAlertOnce(true)
-            .setOngoing(!snapshot.status.finished)
+            .setOngoing(active.isNotEmpty())
             .setShowWhen(false)
             .setPriority(NotificationCompat.PRIORITY_LOW)
 
-        if (!snapshot.status.finished) {
-            if (snapshot.totalBytes > 0) {
-                builder.setProgress(1000, (snapshot.fraction * 1000).toInt(), false)
+        if (active.isNotEmpty()) {
+            val total = running.sumOf { it.snapshot.totalBytes }
+            val done = running.sumOf { it.snapshot.bytesDone }
+            if (total > 0) {
+                builder.setProgress(1000, (done * 1000 / total).toInt().coerceIn(0, 1000), false)
             } else {
                 builder.setProgress(0, 0, true)
             }
-            builder.addAction(0, "Cancel", cancel)
+            builder.addAction(0, "Cancel all", cancel)
         }
 
         return builder.build()
@@ -185,22 +190,36 @@ class DownloadService : Service() {
         const val ACTION_CANCEL = "app.getplexo.mobile.action.CANCEL"
         private const val EXTRA_URL = "url"
         private const val EXTRA_NAME = "name"
+        private const val EXTRA_NETWORKS = "networks"
         private const val EXTRA_STREAMS = "streams"
-        private const val EXTRA_CHUNK = "chunk"
         private const val CHANNEL_ID = "downloads"
         private const val NOTIFICATION_ID = 41
 
-        fun startIntent(context: Context, url: String, name: String?, streams: Int, chunkMb: Int): Intent =
-            Intent(context, DownloadService::class.java).apply {
-                action = ACTION_START
-                putExtra(EXTRA_URL, url)
-                putExtra(EXTRA_NAME, name)
-                putExtra(EXTRA_STREAMS, streams)
-                putExtra(EXTRA_CHUNK, chunkMb.toLong() * 1024L * 1024L)
-            }
+        fun startIntent(
+            context: Context,
+            url: String,
+            name: String?,
+            networks: Set<String>?,
+            streams: Int?,
+        ): Intent = Intent(context, DownloadService::class.java).apply {
+            action = ACTION_START
+            putExtra(EXTRA_URL, url)
+            putExtra(EXTRA_NAME, name)
+            networks?.let { putStringArrayListExtra(EXTRA_NETWORKS, ArrayList(it)) }
+            putExtra(EXTRA_STREAMS, streams ?: 0)
+        }
 
-        fun start(context: Context, url: String, name: String?, streams: Int, chunkMb: Int) {
-            ContextCompat.startForegroundService(context, startIntent(context, url, name, streams, chunkMb))
+        fun start(
+            context: Context,
+            url: String,
+            name: String?,
+            networks: Set<String>?,
+            streams: Int?,
+        ) {
+            ContextCompat.startForegroundService(
+                context,
+                startIntent(context, url, name, networks, streams),
+            )
         }
 
         fun cancel(context: Context) {

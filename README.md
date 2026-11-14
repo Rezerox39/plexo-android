@@ -12,6 +12,13 @@ with its Manrope + Roboto Mono typography and its merge-node mark. Each connecti
 downloads a different `Range` of the file, and the parts are written into one file
 at their offsets.
 
+The parity work was checked against the **shipped desktop v1.0.0-rc.15** app
+(its `app.asar`, not only the repository): the same screens, filters, row actions,
+queue, history, schedule, data/speed caps, network editor, theme palette and speed
+graph are represented here where Android can support them. The exact
+implemented/partial/impossible list lives in
+[docs/DESKTOP-PARITY.md](docs/DESKTOP-PARITY.md).
+
 ---
 
 ## Read this first: what is and isn't possible
@@ -79,12 +86,13 @@ like bonding while adding no bandwidth, and the UI says so instead.
 ## Screens and features
 
 - **Links panel** — Wi-Fi, Mobile data, Bluetooth PAN and Wired/USB with live
-  state, and a switch per link. Toggles persist across launches. Android 10+
-  forbids apps from switching Wi-Fi or mobile data on themselves, so a switch
-  only declares "Plexo may use this link": when the radio is off the panel says
-  so immediately and offers a button that opens the right system panel. The
-  network request stays registered, so the link joins as soon as the radio
-  comes up, without a restart or a retry wait.
+  state, a switch per link, a rename (40 characters, like desktop), an eight-colour
+  swatch picker, per-link stream count (Auto/4/8/16/32), a per-link speed cap and a
+  per-link data cap (day/week/month) counted from Plexo's own bytes. Toggles and
+  names persist across launches. Android forbids apps from switching Wi-Fi or
+  mobile data on themselves, so a switch only declares "Plexo may use this link":
+  when the radio is off the panel says so immediately and offers a button that
+  opens the right system panel.
 - **Adaptive parallel downloader** — probes the server, honours `Accept-Ranges`,
   works out the file name from `Content-Disposition`, and lets all links pull ranges
   from one shared byte cursor. Each request is sized from that link's own measured
@@ -94,23 +102,38 @@ like bonding while adding no bandwidth, and the UI says so instead.
   averaged over a rolling two-second window, so the readout does not flicker with
   the modem's burst/sleep cycle. Connections are pooled per link, so chunks reuse
   warm TCP/TLS sessions instead of paying a handshake each time.
-- **Live split view** — total speed, ETA, and bytes/speed per link, plus a stacked
-  bar showing each link's share of the file.
-- **Desktop-matched theme** — exact palette from the Plexo renderer (`#1B1E20`
-  graphite, `#202325` panels, `#EAE7E2` warm text, `#D8A44C` amber), 8 dp flat
-  cards, tracked-out mono section labels and tabular numbers. The launcher icon and
+- **Queue and history** — desktop's *downloads at once* setting (1–4) is honoured;
+  extra files wait in the queue. Every finished or failed transfer stays in a
+  scrollable history with the file's source link, size, time and saved path.
+  Filters: All / Downloading / Queued / Needs attention / Finished, with counts.
+- **Row actions and detail** — cancel, retry, remove, copy link, open the saved
+  file, and a detail sheet with the full per-link split, a 60-second throughput
+  graph, ETA, stream count and source URL.
+- **Four themes** — System, Light, Dark and Pure black. Dark uses the exact desktop
+  palette (`#1B1E20` graphite, `#202325` panels, `#EAE7E2` warm text, `#D8A44C`
+  amber); Light is warm paper; Pure black is OLED true black. The launcher icon and
   in-app mark are the desktop's three converging network lines and white arrow.
+- **Desktop speed controls** — MB/s or Mbps everywhere, a shared total speed limit,
+  Slow mode (desktop's one-switch 2 MB/s default), and a per-link cap. The app-wide
+  limiter paces actual bytes across every stream and every concurrent file, not one
+  request at a time.
+- **Download schedule** — enable, start/end time, weekdays, and an optional end
+  date. Queued files start when the window opens and wait while it is closed.
+  (A file already transferring finishes rather than being cut mid-range.)
+- **Live split view** — aggregate speed, ETA, a throughput strip chart, and
+  bytes/speed per link, plus a stacked bar showing each link's share of each file.
 - **Graceful fallback** — a server that ignores `Range` gets a single-stream
   download and a clear note in the UI.
-- **Foreground service** — progress notification with cancel, survives leaving
-  the app.
-- **Saves into `Download/Plexo`** through MediaStore, so no storage permission is
+- **Foreground service** — progress notification for the queue with *Cancel all*,
+  survives leaving the app.
+- **Saves into `Downloads/Plexo`** through MediaStore, so no storage permission is
   needed on Android 10+.
-- **Share to Plexo** — send a link from any browser via the Android share sheet.
+- **Share to Plexo** — send a link from any browser via the Android share sheet; it
+  opens the new-download sheet with the URL already filled.
 
 ## Install
 
-Grab `plexo-0.3.0-debug.apk` from the [latest release](../../releases/latest) and open it
+Grab `plexo-0.4.0-debug.apk` from the [latest release](../../releases/latest) and open it
 on the phone. It is debug-signed, so Android asks you to allow installing from your
 browser or file manager the first time.
 
@@ -182,10 +205,14 @@ Key files:
 | Path | Role |
 | --- | --- |
 | `core/Links.kt` | Network requests, link state, `BoundSocketFactory`, per-network DNS and OkHttp clients |
-| `core/Downloads.kt` | Probe, adaptive range planner, work-stealing workers, retries, progress maths, repository |
+| `core/Downloads.kt` | Probe, adaptive range planner, work-stealing workers, retries, progress maths, queue/history repository |
+| `core/RateLimiter.kt` | Shared total and per-link byte pacing across every stream and file |
+| `core/Settings.kt` | Themes, speed units, queue depth, schedule, caps and per-link preferences |
 | `core/Store.kt` | MediaStore hand-off |
-| `service/DownloadService.kt` | Foreground service and notification |
-| `ui/HomeScreen.kt` | Compose UI: links, new download, live split, tuning |
+| `service/DownloadService.kt` | Foreground service and aggregate notification |
+| `ui/HomeScreen.kt` | Downloads list, filters, new-download sheet, detail sheet |
+| `ui/SettingsScreen.kt` | Appearance, engine, speed, schedule, network editor |
+| `ui/Theme.kt` | Four Plexo palettes and typography |
 
 Error handling: a range that fails is retried up to six times on another link; a
 link that fails three times is taken out of rotation for that download; leftover
@@ -196,15 +223,22 @@ Wi-Fi, and a partly written range is re-fetched and counted once.
 
 ## Not in this build
 
-Deliberately out of scope for a first version, in order of usefulness:
+The detailed table is in [docs/DESKTOP-PARITY.md](docs/DESKTOP-PARITY.md). The
+honest summary:
 
-1. **Resume across app restarts** — would need persisted chunk maps.
-2. **Queue and multiple concurrent downloads** — the engine is one-at-a-time today.
-3. **Torrents, magnet links and NZB** — Plexo desktop supports these; they are each
-   a project of their own.
-4. **VPN relay for system-wide aggregation** — needs a server endpoint and a
+1. **Pause / resume across app restarts** — the engine can retry ranges inside a
+   running job, but it does not yet persist a chunk map, so closing the process
+   cancels the transfer and removes its `.part`. Desktop can pause and continue.
+2. **Torrents, magnet links and NZB** — desktop Plexo has a torrent engine. This
+   port has no torrent stack yet; adding one is a project of its own, not a toggle.
+3. **Schedule stopping an active file at the end of the window** — the schedule
+   gates *new* downloads. It does not cut a transfer that is already running.
+4. **Desktop's multi-select and bulk action bar** — actions are per download here.
+5. **VPN relay for system-wide aggregation** — needs a server endpoint and a
    `VpnService`; see the section above.
-5. **Per-link speed limits and data caps.**
+6. **Full system data counters** — the per-link data caps count only bytes Plexo
+   itself carries. Reading system-wide per-network usage needs the sensitive
+   `PACKAGE_USAGE_STATS` permission, which this app deliberately does not request.
 
 ## Licence
 

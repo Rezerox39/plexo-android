@@ -5,7 +5,9 @@ package app.getplexo.mobile.ui
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.Font
@@ -14,31 +16,117 @@ import androidx.compose.ui.text.font.FontVariation
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 import app.getplexo.mobile.R
+import app.getplexo.mobile.core.ThemeMode
 
 /**
- * The Android app follows the desktop Plexo "v2" design: a graphite instrument
- * panel, warm off-white type, amber as the brand accent, and teal / steel / amber
- * for the individual links. Values are the exact ones in the desktop renderer's
- * main.css, not an approximation.
+ * Plexo's desktop design, in four finishes: the graphite "instrument panel", a
+ * warm paper light theme, and an OLED black theme. The accent and the link
+ * colours stay the same so a network keeps its identity in every theme.
  */
-val Ink = Color(0xFF1B1E20) // --bg
-val Panel = Color(0xFF202325) // --bg-secondary
-val PanelRaised = Color(0xFF242729) // --input-bg
-val Track = Color(0xFF262A2D) // --track-bg
-val Stroke = Color(0xFF2B2F33) // --border
-val StrokeSubtle = Color(0xFF23262A) // --border-subtle
-val StrokeStrong = Color(0xFF33383C) // --border-strong
+data class PlexoPalette(
+    val ink: Color,
+    val panel: Color,
+    val raised: Color,
+    val track: Color,
+    val stroke: Color,
+    val strokeSubtle: Color,
+    val strokeStrong: Color,
+    val textPrimary: Color,
+    val textMuted: Color,
+    val textFaint: Color,
+    val amber: Color,
+    val onAmber: Color,
+    val mint: Color,
+    val violet: Color,
+    val coral: Color,
+    val steel: Color,
+    val cyan: Color,
+    val isLight: Boolean,
+)
 
-val TextPrimary = Color(0xFFEAE7E2) // --text
-val TextMuted = Color(0xFFA9ADB2) // --text-secondary
-val TextFaint = Color(0xFF8D9196) // --text-tertiary
+private val DarkPalette = PlexoPalette(
+    ink = Color(0xFF1B1E20),
+    panel = Color(0xFF202325),
+    raised = Color(0xFF242729),
+    track = Color(0xFF262A2D),
+    stroke = Color(0xFF2B2F33),
+    strokeSubtle = Color(0xFF23262A),
+    strokeStrong = Color(0xFF33383C),
+    textPrimary = Color(0xFFEAE7E2),
+    textMuted = Color(0xFFA9ADB2),
+    textFaint = Color(0xFF8D9196),
+    amber = Color(0xFFD8A44C),
+    onAmber = Color(0xFF1B1408),
+    mint = Color(0xFF4EA89A),
+    violet = Color(0xFF9C8FD6),
+    coral = Color(0xFFEDA3A3),
+    steel = Color(0xFF7E93BD),
+    cyan = Color(0xFF6DB8C9),
+    isLight = false,
+)
 
-val Mint = Color(0xFF4EA89A) // --color-wifi / --color-success
-val Violet = Color(0xFF9C8FD6) // --swatch-violet
-val Amber = Color(0xFFD8A44C) // --color-accent / --color-usb
-val Coral = Color(0xFFEDA3A3) // --color-danger
-val Steel = Color(0xFF7E93BD) // --color-ethernet
-val Cyan = Color(0xFF6DB8C9) // --swatch-cyan
+private val LightPalette = PlexoPalette(
+    ink = Color(0xFFF4F0E9),
+    panel = Color(0xFFFCFAF6),
+    raised = Color(0xFFFFFFFF),
+    track = Color(0xFFE8E1D6),
+    stroke = Color(0xFFDCD3C5),
+    strokeSubtle = Color(0xFFE7DFD3),
+    strokeStrong = Color(0xFFC8BCA9),
+    textPrimary = Color(0xFF202325),
+    textMuted = Color(0xFF5D6469),
+    textFaint = Color(0xFF7A8187),
+    amber = Color(0xFFA96F12),
+    onAmber = Color(0xFFFFFBF3),
+    mint = Color(0xFF2F7F72),
+    violet = Color(0xFF6C5CA8),
+    coral = Color(0xFFB2453E),
+    steel = Color(0xFF4E6696),
+    cyan = Color(0xFF2E7D8C),
+    isLight = true,
+)
+
+private val BlackPalette = DarkPalette.copy(
+    ink = Color(0xFF000000),
+    panel = Color(0xFF0A0A0B),
+    raised = Color(0xFF121214),
+    track = Color(0xFF19191C),
+    stroke = Color(0xFF232327),
+    strokeSubtle = Color(0xFF17171A),
+    strokeStrong = Color(0xFF323237),
+    textPrimary = Color(0xFFF3F0EB),
+    textMuted = Color(0xFFA2A6AB),
+    textFaint = Color(0xFF85898E),
+)
+
+val LocalPlexoPalette = staticCompositionLocalOf { DarkPalette }
+
+private fun paletteFor(mode: ThemeMode, systemDark: Boolean): PlexoPalette = when (mode) {
+    ThemeMode.SYSTEM -> if (systemDark) DarkPalette else LightPalette
+    ThemeMode.LIGHT -> LightPalette
+    ThemeMode.DARK -> DarkPalette
+    ThemeMode.BLACK -> BlackPalette
+}
+
+// Composables read these names exactly like the old fixed colours; the value now
+// follows the selected theme. Draw lambdas must capture them before Canvas.
+val Ink: Color @Composable get() = LocalPlexoPalette.current.ink
+val Panel: Color @Composable get() = LocalPlexoPalette.current.panel
+val PanelRaised: Color @Composable get() = LocalPlexoPalette.current.raised
+val Track: Color @Composable get() = LocalPlexoPalette.current.track
+val Stroke: Color @Composable get() = LocalPlexoPalette.current.stroke
+val StrokeSubtle: Color @Composable get() = LocalPlexoPalette.current.strokeSubtle
+val StrokeStrong: Color @Composable get() = LocalPlexoPalette.current.strokeStrong
+val TextPrimary: Color @Composable get() = LocalPlexoPalette.current.textPrimary
+val TextMuted: Color @Composable get() = LocalPlexoPalette.current.textMuted
+val TextFaint: Color @Composable get() = LocalPlexoPalette.current.textFaint
+val Mint: Color @Composable get() = LocalPlexoPalette.current.mint
+val Violet: Color @Composable get() = LocalPlexoPalette.current.violet
+val Amber: Color @Composable get() = LocalPlexoPalette.current.amber
+val OnAmber: Color @Composable get() = LocalPlexoPalette.current.onAmber
+val Coral: Color @Composable get() = LocalPlexoPalette.current.coral
+val Steel: Color @Composable get() = LocalPlexoPalette.current.steel
+val Cyan: Color @Composable get() = LocalPlexoPalette.current.cyan
 
 private val Manrope = FontFamily(
     Font(
@@ -81,22 +169,6 @@ private val RobotoMono = FontFamily(
     ),
 )
 
-private val Scheme = darkColorScheme(
-    primary = Amber,
-    onPrimary = Color(0xFF1B1408),
-    secondary = Mint,
-    onSecondary = Color(0xFF10201D),
-    tertiary = Steel,
-    background = Ink,
-    onBackground = TextPrimary,
-    surface = Panel,
-    onSurface = TextPrimary,
-    surfaceVariant = PanelRaised,
-    onSurfaceVariant = TextMuted,
-    outline = StrokeStrong,
-    error = Coral,
-)
-
 private val PlexoTypography = Typography(
     headlineSmall = TextStyle(
         fontFamily = Manrope,
@@ -125,7 +197,6 @@ private val PlexoTypography = Typography(
         fontSize = 12.sp,
         lineHeight = 17.sp,
     ),
-    // Section labels are the desktop's tracked-out mono: 10 px, 0.2em.
     labelSmall = TextStyle(
         fontFamily = RobotoMono,
         fontWeight = FontWeight.W500,
@@ -138,7 +209,6 @@ private val PlexoTypography = Typography(
         fontSize = 11.sp,
         letterSpacing = 0.4.sp,
     ),
-    // Every number in Plexo (speeds, bytes, ETA, percentages) is Roboto Mono.
     displaySmall = TextStyle(
         fontFamily = RobotoMono,
         fontWeight = FontWeight.W600,
@@ -147,7 +217,6 @@ private val PlexoTypography = Typography(
     ),
 )
 
-/** Number style for the small mono readouts under charts, progress and links. */
 val MonoSmall = TextStyle(
     fontFamily = RobotoMono,
     fontWeight = FontWeight.W400,
@@ -155,7 +224,6 @@ val MonoSmall = TextStyle(
     letterSpacing = 0.sp,
 )
 
-/** Medium mono emphasis for values that sit next to a mono label. */
 val MonoMedium = TextStyle(
     fontFamily = RobotoMono,
     fontWeight = FontWeight.W600,
@@ -164,11 +232,51 @@ val MonoMedium = TextStyle(
 )
 
 @Composable
-fun PlexoTheme(content: @Composable () -> Unit) {
-    // Plexo is designed dark only, like the desktop's graphite panel.
-    MaterialTheme(
-        colorScheme = Scheme,
-        typography = PlexoTypography,
-        content = content,
-    )
+fun PlexoTheme(
+    mode: ThemeMode = ThemeMode.DARK,
+    systemDark: Boolean = true,
+    content: @Composable () -> Unit,
+) {
+    val palette = paletteFor(mode, systemDark)
+    val scheme = if (palette.isLight) {
+        lightColorScheme(
+            primary = palette.amber,
+            onPrimary = palette.onAmber,
+            secondary = palette.mint,
+            onSecondary = Color.White,
+            tertiary = palette.steel,
+            background = palette.ink,
+            onBackground = palette.textPrimary,
+            surface = palette.panel,
+            onSurface = palette.textPrimary,
+            surfaceVariant = palette.raised,
+            onSurfaceVariant = palette.textMuted,
+            outline = palette.strokeStrong,
+            error = palette.coral,
+        )
+    } else {
+        darkColorScheme(
+            primary = palette.amber,
+            onPrimary = palette.onAmber,
+            secondary = palette.mint,
+            onSecondary = Color(0xFF10201D),
+            tertiary = palette.steel,
+            background = palette.ink,
+            onBackground = palette.textPrimary,
+            surface = palette.panel,
+            onSurface = palette.textPrimary,
+            surfaceVariant = palette.raised,
+            onSurfaceVariant = palette.textMuted,
+            outline = palette.strokeStrong,
+            error = palette.coral,
+        )
+    }
+
+    androidx.compose.runtime.CompositionLocalProvider(LocalPlexoPalette provides palette) {
+        MaterialTheme(
+            colorScheme = scheme,
+            typography = PlexoTypography,
+            content = content,
+        )
+    }
 }

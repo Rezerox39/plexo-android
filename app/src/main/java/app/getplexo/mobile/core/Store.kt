@@ -9,9 +9,11 @@ import java.io.File
 import java.io.IOException
 
 /** Hands a finished temp file to the public Downloads collection. */
+data class SavedFile(val path: String, val uri: String)
+
 object Store {
 
-    fun save(context: Context, source: File, displayName: String, mime: String?): String {
+    fun save(context: Context, source: File, displayName: String, mime: String?): SavedFile {
         val resolver = context.contentResolver
         val type = mime?.takeIf { it.isNotBlank() && it != "application/octet-stream" }
             ?: MimeTypeMap.getSingleton()
@@ -48,7 +50,7 @@ object Store {
             resolver.query(uri, arrayOf(MediaStore.Downloads.DISPLAY_NAME), null, null, null)
                 ?.use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
         }.getOrNull() ?: displayName
-        return "Download/Plexo/$actual"
+        return SavedFile(path = "Download/Plexo/$actual", uri = uri.toString())
     }
 
     fun sanitize(raw: String): String {

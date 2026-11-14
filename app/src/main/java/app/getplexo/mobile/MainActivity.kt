@@ -8,21 +8,28 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.viewModels
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Surface
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.compose.ui.platform.LocalView
+import androidx.core.view.WindowCompat
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.getplexo.mobile.ui.HomeScreen
 import app.getplexo.mobile.ui.Ink
+import app.getplexo.mobile.ui.LocalPlexoPalette
 import app.getplexo.mobile.ui.PlexoTheme
 import app.getplexo.mobile.ui.PlexoViewModel
 
 class MainActivity : ComponentActivity() {
 
     private var incomingUrl by mutableStateOf<String?>(null)
+    private val vm: PlexoViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -31,9 +38,17 @@ class MainActivity : ComponentActivity() {
         incomingUrl = extractUrl(intent)
 
         setContent {
-            PlexoTheme {
+            val theme by vm.theme.collectAsStateWithLifecycle()
+            PlexoTheme(mode = theme, systemDark = isSystemInDarkTheme()) {
+                val palette = LocalPlexoPalette.current
+                val view = LocalView.current
+                SideEffect {
+                    WindowCompat.getInsetsController(window, view).apply {
+                        isAppearanceLightStatusBars = palette.isLight
+                        isAppearanceLightNavigationBars = palette.isLight
+                    }
+                }
                 Surface(modifier = Modifier.fillMaxSize(), color = Ink) {
-                    val vm: PlexoViewModel = viewModel()
                     HomeScreen(
                         vm = vm,
                         initialUrl = incomingUrl,

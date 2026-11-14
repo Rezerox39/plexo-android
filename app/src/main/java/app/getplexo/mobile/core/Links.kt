@@ -29,6 +29,8 @@ import javax.net.SocketFactory
 /** Live state of one physical link (radio). */
 data class LinkState(
     val enabled: Boolean = false,
+    val displayName: String = "",
+    val color: Long = 0xFF4EA89A,
     val connected: Boolean = false,
     val validated: Boolean = false,
     val metered: Boolean = false,
@@ -70,8 +72,18 @@ class Link(
     /** Reads the system radio switch; null when the platform hides it. */
     private val radioOn: () -> Boolean?,
 ) {
-    private val _state = MutableStateFlow(LinkState(enabled = initiallyEnabled))
+    private val _state = MutableStateFlow(
+        LinkState(enabled = initiallyEnabled, displayName = title, color = color),
+    )
     val state: StateFlow<LinkState> = _state.asStateFlow()
+
+    fun setDisplayName(value: String) {
+        _state.value = _state.value.copy(displayName = value.trim().take(40).ifBlank { title })
+    }
+
+    fun setColor(value: Long) {
+        _state.value = _state.value.copy(color = value)
+    }
 
     private var callback: ConnectivityManager.NetworkCallback? = null
     private var enabled = initiallyEnabled
@@ -99,10 +111,15 @@ class Link(
         network = null
         cb?.let { runCatching { cm.unregisterNetworkCallback(it) } }
         if (on) {
-            _state.value = LinkState(enabled = true)
+            _state.value = _state.value.copy(enabled = true)
             request()
         } else {
-            _state.value = LinkState(enabled = false)
+            _state.value = _state.value.copy(
+                enabled = false,
+                connected = false,
+                validated = false,
+                networkKey = null,
+            )
         }
     }
 
@@ -289,11 +306,31 @@ class LinkRegistry(context: Context) {
         ),
     )
 
+    init {
+        links.forEach { link ->
+            prefs.getString("name_${link.id}", null)?.let { link.setDisplayName(it) }
+            val color = prefs.getLong("color_${link.id}", link.color)
+            link.setColor(color)
+        }
+    }
+
     fun link(id: String): Link? = links.firstOrNull { it.id == id }
 
     fun setEnabled(id: String, on: Boolean) {
         link(id)?.setEnabled(on)
         prefs.edit().putBoolean(id, on).apply()
+    }
+
+    fun rename(id: String, name: String) {
+        val link = link(id) ?: return
+        val clean = name.trim().take(40).ifBlank { link.title }
+        link.setDisplayName(clean)
+        prefs.edit().putString("name_$id", clean).apply()
+    }
+
+    fun setColor(id: String, color: Long) {
+        link(id)?.setColor(color)
+        prefs.edit().putLong("color_$id", color).apply()
     }
 
     /**
@@ -303,11 +340,13 @@ class LinkRegistry(context: Context) {
      * interface (a USB dock can look like both Ethernet and USB). Downloading over both
      * would not add bandwidth, so the later link is left out and the UI says why.
      */
-    fun usable(): List<Link> {
+    fun usable(allowed: Set<String>? = null): List<Link> {
         val seen = HashSet<String>()
         return links.filter { link ->
             val key = link.networkKey
-            link.usable && key != null && seen.add(key)
+            link.usable && key != null &&
+                (allowed == null || link.id in allowed) &&
+                seen.add(key)
         }
     }
 
